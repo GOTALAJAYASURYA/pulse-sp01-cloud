@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: pulse_timescaledb
+    environment:
+      POSTGRES_USER: pulse_admin
+      POSTGRES_PASSWORD: pulse_secure_password_2026
+      POSTGRES_DB: pulse_sp01_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: always
+
+  redis:
+    image: redis:7-alpine
+    container_name: pulse_redis
+    ports:
+      - "6379:6379"
+    restart: always
+
+  emqx:
+    image: emqx/emqx:5.6.1
+    container_name: pulse_emqx
+    ports:
+      - "1883:1883"      # MQTT TCP
+      - "8883:8883"      # MQTT TLS
+      - "8083:8083"      # MQTT WebSocket
+      - "18083:18083"    # EMQX Web Dashboard
+    environment:
+      EMQX_DASHBOARD__DEFAULT_USERNAME: "admin"
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: "public_password"
+    volumes:
+      - emqx_data:/opt/emqx/data
+    restart: always
+
+volumes:
+  pgdata:
+  emqx_data:
