@@ -408,7 +408,12 @@ def get_discharged_records(db: Session = Depends(get_db)):
 @app.websocket("/ws/telemetry")
 async def websocket_telemetry_endpoint(websocket: WebSocket):
     await websocket.accept()
-    r = aioredis.Redis(host="localhost", port=6379, db=0)
+    redis_url = os.getenv("REDIS_HOST", "localhost")
+    if redis_url.startswith("redis://"):
+        r = aioredis.from_url(redis_url)
+    else:
+        r = aioredis.Redis(host=redis_url, port=int(os.getenv("REDIS_PORT", "6379")), db=0)
+        
     pubsub = r.pubsub()
     await pubsub.subscribe("channel:telemetry")
     
@@ -425,3 +430,26 @@ async def websocket_telemetry_endpoint(websocket: WebSocket):
         await pubsub.unsubscribe("channel:telemetry")
         await pubsub.close()
         await r.close()
+
+'''
+@app.websocket("/ws/telemetry")
+async def websocket_telemetry_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    r = aioredis.Redis(host="localhost", port=6379, db=0)
+    pubsub = r.pubsub()
+    await pubsub.subscribe("channel:telemetry")
+    
+    try:
+        while True:
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            if message and message.get("type") == "message":
+                data = message["data"].decode("utf-8")
+                await websocket.send_text(data)
+            await asyncio.sleep(0.05)
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        await pubsub.unsubscribe("channel:telemetry")
+        await pubsub.close()
+        await r.close() '''
+        
