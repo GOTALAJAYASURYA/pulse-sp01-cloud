@@ -10,6 +10,9 @@ import {
 } from 'lucide-react';
 import { Html5Qrcode } from 'html5-qrcode';
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'https://pulse-sp01-backend.onrender.com';
+const WS_BASE = process.env.NEXT_PUBLIC_WS_URL || 'wss://pulse-sp01-backend.onrender.com/ws/telemetry';
+
 interface ActiveBed {
   association_id: string;
   pump_id: string;
@@ -78,7 +81,7 @@ export default function SmartWardCentral() {
   // Fetch Ward Registry & Update Auto-Increment State
   const fetchRegistry = async () => {
     try {
-      const res = await fetch('http://localhost:8000/api/v1/registry-status');
+      const res = await fetch(`${API_BASE}/api/v1/registry-status`);
       if (res.ok) {
         const data = await res.json();
         setBeds(data.active_associations || []);
@@ -97,7 +100,7 @@ export default function SmartWardCentral() {
 
   const fetchDischargedRecords = async () => {
     try {
-      const res = await fetch('http://localhost:8000/api/v1/discharged-records');
+      const res = await fetch(`${API_BASE}/api/v1/discharged-records`);
       if (res.ok) {
         const data = await res.json();
         setDischargedRecords(data);
@@ -131,7 +134,7 @@ export default function SmartWardCentral() {
   };
 
   useEffect(() => {
-    const ws = new WebSocket('ws://localhost:8000/ws/telemetry');
+    const ws = new WebSocket(WS_BASE);
     ws.onopen = () => setConnected(true);
     ws.onclose = () => setConnected(false);
     ws.onmessage = (event) => {
@@ -232,7 +235,7 @@ export default function SmartWardCentral() {
   const handlePair = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch('http://localhost:8000/api/v1/pair', {
+      const res = await fetch(`${API_BASE}/api/v1/pair`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -258,7 +261,7 @@ export default function SmartWardCentral() {
   const handleDischarge = async (pumpId: string) => {
     if (!confirm(`Discharge patient and release Syringe Pump ${pumpId}? Session will be permanently logged to clinical history.`)) return;
     try {
-      await fetch('http://localhost:8000/api/v1/discharge', {
+      await fetch(`${API_BASE}/api/v1/discharge`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pump_id: pumpId })
@@ -272,7 +275,7 @@ export default function SmartWardCentral() {
   const openHistoryModal = async (pumpId: string) => {
     setSelectedHistoryPump(pumpId);
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/history/${pumpId}`);
+      const res = await fetch(`${API_BASE}/api/v1/history/${pumpId}`);
       if (res.ok) {
         const data = await res.json();
         setHistoryLogs(data);
