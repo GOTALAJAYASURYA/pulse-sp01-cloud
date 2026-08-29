@@ -1,5 +1,6 @@
-import asyncio
+import os
 import json
+import asyncio
 from datetime import datetime, timezone
 import uuid
 import redis.asyncio as aioredis
@@ -9,11 +10,13 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
-from app.core.database import SessionLocal
-from app.core.database import engine, Base, SessionLocal
+from app.core.database import SessionLocal, engine, Base
 from app.mqtt.worker import start_mqtt_worker
 from app.simulator_runner import start_cloud_simulator
 from app.models.models import Ward, Bed, Pump, Patient, Admission, DeviceAssociation, PumpTelemetryLog
+
+# Create all database tables immediately on startup
+Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Pulse SP-01 Central Telemetry & Smart Ward System")
 
@@ -33,11 +36,7 @@ def get_db():
         db.close()
 
 @app.on_event("startup")
-async def startup_event():
-    # 1. Create all missing tables in PostgreSQL
-    Base.metadata.create_all(bind=engine)
-    
-    # 2. Start background services
+def startup_event():
     start_mqtt_worker()
     start_cloud_simulator()
 
@@ -52,73 +51,6 @@ class DischargeRequest(BaseModel):
     pump_id: str
 
 # --- REST Endpoints ---
-'''
-@app.get("/api/v1/registry-status")
-def get_registry_status(db: Session = Depends(get_db)):
-    """Fetch active fleet associations and calculate the next auto-increment IDs."""
-    try:
-        # Query active associations with all related models via ORM
-        active_assocs = (
-            db.query(DeviceAssociation)
-            .filter(DeviceAssociation.unpaired_at.is_(None))
-            .order_by(DeviceAssociation.paired_at.desc())
-            .all()
-        )
-
-        res_list = []
-        busy_pumps = set()
-        busy_beds = set()
-
-        for da in active_assocs:
-            busy_pumps.add(da.pump_id)
-            bed = db.query(Bed).filter(Bed.bed_id == da.bed_id).first()
-            bed_no = bed.bed_number if bed else "ICU-B1"
-            busy_beds.add(bed_no)
-
-            admission = db.query(Admission).filter(Admission.admission_id == da.admission_id).first() if da.admission_id else None
-            patient = db.query(Patient).filter(Patient.patient_id == admission.patient_id).first() if admission else None
-
-            p_name = f"{patient.first_name} {patient.last_name}".strip() if patient else "Patient"
-            p_mrn = patient.patient_id if patient else "PTN-000001"
-
-            res_list.append({
-                "association_id": str(da.association_id),
-                "pump_id": da.pump_id,
-                "bed_number": bed_no,
-                "patient_mrn": p_mrn,
-                "patient_name": p_name,
-                "paired_at": da.paired_at.isoformat() if da.paired_at else None
-            })
-
-        total_patients = db.query(Patient).count()
-        total_pumps = db.query(Pump).count()
-
-        next_seq = max(len(active_assocs) + 1, total_pumps + 1)
-        next_pat_seq = max(len(active_assocs) + 1, total_patients + 1)
-
-        next_bed = f"ICU-B{len(active_assocs) + 1}"
-        next_mrn = f"PTN-{str(next_pat_seq).zfill(6)}"
-        next_pump = f"SP01-2026-{str(next_seq).zfill(4)}"
-
-        return {
-            "active_associations": res_list,
-            "busy_pumps": list(busy_pumps),
-            "busy_beds": list(busy_beds),
-            "next_suggestions": {
-                "bed": next_bed,
-                "mrn": next_mrn,
-                "pump": next_pump
-            }
-        }
-    except Exception as e:
-        print(f"[!] Registry status error: {e}")
-        return {
-            "active_associations": [],
-            "busy_pumps": [],
-            "busy_beds": [],
-            "next_suggestions": {"bed": "ICU-B1", "mrn": "PTN-000001", "pump": "SP01-2026-0001"}
-        }
-'''
 
 @app.get("/api/v1/registry-status")
 def get_registry_status(db: Session = Depends(get_db)):
@@ -363,7 +295,6 @@ def get_pump_history(pump_id: str, db: Session = Depends(get_db)):
 def get_discharged_records(db: Session = Depends(get_db)):
     """Fetch complete historical audit logs for all discharged patient sessions."""
     try:
-        # Fetch all past sessions where unpaired_at is NOT null
         records = (
             db.query(DeviceAssociation)
             .filter(DeviceAssociation.unpaired_at.isnot(None))
@@ -377,7 +308,6 @@ def get_discharged_records(db: Session = Depends(get_db)):
             patient = db.query(Patient).filter(Patient.patient_id == admission.patient_id).first() if admission else None
             bed = db.query(Bed).filter(Bed.bed_id == r.bed_id).first()
 
-            # Calculate total volume delivered and total alarms during this specific session
             telemetry_summary = db.execute(
                 text("""
                     SELECT 
@@ -420,7 +350,6 @@ async def websocket_telemetry_endpoint(websocket: WebSocket):
     
     redis_url = os.getenv("REDIS_URL") or os.getenv("REDIS_HOST")
     
-    # If Redis is configured on Render, use PubSub
     if redis_url and redis_url != "localhost":
         try:
             if redis_url.startswith("redis://") or redis_url.startswith("rediss://"):
@@ -437,68 +366,15 @@ async def websocket_telemetry_endpoint(websocket: WebSocket):
                     data = message["data"].decode("utf-8") if isinstance(message["data"], bytes) else message["data"]
                     await websocket.send_text(data)
                 await asyncio.sleep(0.05)
-        except (WebSocketDisconnect, Exception) as e:
+        except Exception:
             pass
         finally:
             connected_websockets.discard(websocket)
     else:
-        # Standalone Cloud Fallback (Keep socket open without requiring Redis)
         try:
             while True:
-                # Keep connection alive
-                await websocket.receive_text()
-        except WebSocketDisconnect:
+                await asyncio.sleep(1)
+        except Exception:
             pass
         finally:
             connected_websockets.discard(websocket)
-
-'''
-# --- WebSockets ---
-@app.websocket("/ws/telemetry")
-async def websocket_telemetry_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    redis_url = os.getenv("REDIS_HOST", "localhost")
-    if redis_url.startswith("redis://"):
-        r = aioredis.from_url(redis_url)
-    else:
-        r = aioredis.Redis(host=redis_url, port=int(os.getenv("REDIS_PORT", "6379")), db=0)
-        
-    pubsub = r.pubsub()
-    await pubsub.subscribe("channel:telemetry")
-    
-    try:
-        while True:
-            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-            if message and message.get("type") == "message":
-                data = message["data"].decode("utf-8")
-                await websocket.send_text(data)
-            await asyncio.sleep(0.05)
-    except (WebSocketDisconnect, Exception):
-        pass
-    finally:
-        await pubsub.unsubscribe("channel:telemetry")
-        await pubsub.close()
-        await r.close()
-'''
-'''
-@app.websocket("/ws/telemetry")
-async def websocket_telemetry_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    r = aioredis.Redis(host="localhost", port=6379, db=0)
-    pubsub = r.pubsub()
-    await pubsub.subscribe("channel:telemetry")
-    
-    try:
-        while True:
-            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
-            if message and message.get("type") == "message":
-                data = message["data"].decode("utf-8")
-                await websocket.send_text(data)
-            await asyncio.sleep(0.05)
-    except (WebSocketDisconnect, Exception):
-        pass
-    finally:
-        await pubsub.unsubscribe("channel:telemetry")
-        await pubsub.close()
-        await r.close() '''
-        
