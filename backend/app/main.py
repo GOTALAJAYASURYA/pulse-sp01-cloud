@@ -11,6 +11,7 @@ from sqlalchemy import text
 
 from app.core.database import SessionLocal
 from app.mqtt.worker import start_mqtt_worker
+from app.simulator_runner import start_cloud_simulator
 from app.models.models import Ward, Bed, Pump, Patient, Admission, DeviceAssociation, PumpTelemetryLog
 
 app = FastAPI(title="Pulse SP-01 Central Telemetry & Smart Ward System")
@@ -33,6 +34,7 @@ def get_db():
 @app.on_event("startup")
 async def startup_event():
     start_mqtt_worker()
+    start_cloud_simulator()
 
 # --- Schemas ---
 class PairRequest(BaseModel):
