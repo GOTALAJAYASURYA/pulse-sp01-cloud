@@ -8,7 +8,7 @@ import paho.mqtt.client as mqtt
 MQTT_BROKER = os.getenv("MQTT_BROKER_URL", "broker.emqx.io")
 MQTT_PORT = int(os.getenv("MQTT_BROKER_PORT", "1883"))
 
-# Simulated active fleet
+# Simulated active fleet with SP01-2026-0002 configured for high-pressure occlusion testing
 PUMPS_SIMULATION_CONFIG = [
     {
         "pump_id": "SP01-2026-0001",
@@ -22,15 +22,15 @@ PUMPS_SIMULATION_CONFIG = [
         "force_alarm": False
     },
     {
-        "pump_id": "SP01-2026-0004",
+        "pump_id": "SP01-2026-0002",
         "ward": "icu-ward-a",
-        "drug": "Propofol 1%",
-        "base_rate": 25.0,
+        "drug": "Insulin Regular",
+        "base_rate": 3.5,
         "vtbi": 100.0,
-        "volume_delivered": 68.0,
-        "base_pressure": 38.0,
-        "battery_pct": 88,
-        "force_alarm": False
+        "volume_delivered": 22.4,
+        "base_pressure": 112.0,  # Elevated occlusion baseline (> 100 kPa)
+        "battery_pct": 91,
+        "force_alarm": True      # Active Alarm Testing Case
     },
     {
         "pump_id": "SP01-2026-0003",
@@ -44,14 +44,14 @@ PUMPS_SIMULATION_CONFIG = [
         "force_alarm": False
     },
     {
-        "pump_id": "SP01-2026-0002",
+        "pump_id": "SP01-2026-0004",
         "ward": "icu-ward-a",
-        "drug": "Insulin Regular",
-        "base_rate": 3.5,
+        "drug": "Propofol 1%",
+        "base_rate": 25.0,
         "vtbi": 100.0,
-        "volume_delivered": 22.4,
-        "base_pressure": 35.0,
-        "battery_pct": 91,
+        "volume_delivered": 68.0,
+        "base_pressure": 38.0,
+        "battery_pct": 88,
         "force_alarm": False
     }
 ]
@@ -71,21 +71,27 @@ def simulation_loop():
     while True:
         try:
             for pump in PUMPS_SIMULATION_CONFIG:
-                # 1. Increment delivery volume progressively (rate mL/hr -> delivered mL per second)
+                # 1. Increment delivery volume progressively
                 step_vol = pump["base_rate"] / 3600.0
                 pump["volume_delivered"] += step_vol
                 if pump["volume_delivered"] >= pump["vtbi"]:
                     pump["volume_delivered"] = 0.5  # Reset loop for demo continuity
 
                 # 2. Dynamic pressure fluctuations
-                pressure_fluctuation = random.uniform(-1.2, 1.5)
-                current_pressure = round(pump["base_pressure"] + pressure_fluctuation, 1)
+                if pump.get("force_alarm"):
+                    # High pressure occlusion spike (108.0 kPa to 125.0 kPa)
+                    pressure_fluctuation = random.uniform(-2.0, 5.0)
+                    current_pressure = round(pump["base_pressure"] + pressure_fluctuation, 1)
+                else:
+                    # Normal physiological infusion pressure
+                    pressure_fluctuation = random.uniform(-1.2, 1.5)
+                    current_pressure = round(pump["base_pressure"] + pressure_fluctuation, 1)
 
                 # 3. Calculate remaining time
                 remaining_vol = max(0.0, pump["vtbi"] - pump["volume_delivered"])
                 time_remaining_sec = int((remaining_vol / pump["base_rate"]) * 3600) if pump["base_rate"] > 0 else 0
 
-                # Check alarms
+                # 4. Check alarm triggers
                 alarms = []
                 if pump.get("force_alarm") or current_pressure > 100.0:
                     alarms.append("OCCLUSION_DOWNSTREAM")
@@ -95,7 +101,7 @@ def simulation_loop():
                     "pump_id": pump["pump_id"],
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "infusion_status": {
-                        "state": "INFUSING",
+                        "state": "ALARM" if len(alarms) > 0 else "INFUSING",
                         "rate_ml_hr": pump["base_rate"],
                         "vtbi_ml": pump["vtbi"],
                         "volume_infused_ml": round(pump["volume_delivered"], 2),
