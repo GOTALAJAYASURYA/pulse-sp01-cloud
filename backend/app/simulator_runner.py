@@ -8,7 +8,7 @@ import paho.mqtt.client as mqtt
 MQTT_BROKER = os.getenv("MQTT_BROKER_URL", "broker.emqx.io")
 MQTT_PORT = int(os.getenv("MQTT_BROKER_PORT", "1883"))
 
-# Simulated active fleet with SP01-2026-0002 configured for high-pressure occlusion testing
+# Active simulation fleet config
 PUMPS_SIMULATION_CONFIG = [
     {
         "pump_id": "SP01-2026-0001",
@@ -17,9 +17,8 @@ PUMPS_SIMULATION_CONFIG = [
         "base_rate": 5.0,
         "vtbi": 50.0,
         "volume_delivered": 14.2,
-        "base_pressure": 42.0,
+        "base_pressure": 40.0,
         "battery_pct": 94,
-        "force_alarm": False
     },
     {
         "pump_id": "SP01-2026-0002",
@@ -28,9 +27,8 @@ PUMPS_SIMULATION_CONFIG = [
         "base_rate": 3.5,
         "vtbi": 100.0,
         "volume_delivered": 22.4,
-        "base_pressure": 112.0,  # Elevated occlusion baseline (> 100 kPa)
+        "base_pressure": 35.0,
         "battery_pct": 91,
-        "force_alarm": True      # Active Alarm Testing Case
     },
     {
         "pump_id": "SP01-2026-0003",
@@ -39,9 +37,8 @@ PUMPS_SIMULATION_CONFIG = [
         "base_rate": 2.0,
         "vtbi": 50.0,
         "volume_delivered": 12.0,
-        "base_pressure": 40.0,
+        "base_pressure": 38.0,
         "battery_pct": 98,
-        "force_alarm": False
     },
     {
         "pump_id": "SP01-2026-0004",
@@ -50,9 +47,8 @@ PUMPS_SIMULATION_CONFIG = [
         "base_rate": 25.0,
         "vtbi": 100.0,
         "volume_delivered": 68.0,
-        "base_pressure": 38.0,
+        "base_pressure": 36.0,
         "battery_pct": 88,
-        "force_alarm": False
     }
 ]
 
@@ -68,34 +64,51 @@ def simulation_loop():
         print(f"[!] Cloud Simulator MQTT connect warning: {e}")
         return
 
+    # Random anomaly tracking
+    active_alarm_pump = None
+    next_event_time = time.time() + 10  # First event triggers after 10s
+    alarm_duration_end = 0
+
     while True:
         try:
+            current_time = time.time()
+
+            # Manage Random Alarm Lifecycle
+            if active_alarm_pump is None and current_time >= next_event_time:
+                # 70% chance to trigger an alarm on a random pump, 30% chance of an extended all-clear period
+                if random.random() < 0.70:
+                    chosen_pump = random.choice(PUMPS_SIMULATION_CONFIG)
+                    active_alarm_pump = chosen_pump["pump_id"]
+                    alarm_duration_end = current_time + random.randint(10, 18)  # Alarm lasts 10 to 18 seconds
+                else:
+                    next_event_time = current_time + random.randint(15, 25)
+
+            elif active_alarm_pump and current_time >= alarm_duration_end:
+                # Clear the alarm and return ward to completely normal state
+                active_alarm_pump = None
+                next_event_time = current_time + random.randint(15, 30)  # Next event in 15-30s
+
             for pump in PUMPS_SIMULATION_CONFIG:
-                # 1. Increment delivery volume progressively
+                # 1. Increment volume delivered progressively
                 step_vol = pump["base_rate"] / 3600.0
                 pump["volume_delivered"] += step_vol
                 if pump["volume_delivered"] >= pump["vtbi"]:
-                    pump["volume_delivered"] = 0.5  # Reset loop for demo continuity
+                    pump["volume_delivered"] = 0.5
 
-                # 2. Dynamic pressure fluctuations
-                if pump.get("force_alarm"):
-                    # High pressure occlusion spike (108.0 kPa to 125.0 kPa)
-                    pressure_fluctuation = random.uniform(-2.0, 5.0)
-                    current_pressure = round(pump["base_pressure"] + pressure_fluctuation, 1)
+                # 2. Dynamic pressure simulation
+                alarms = []
+                if pump["pump_id"] == active_alarm_pump:
+                    # Random Occlusion Spike (106.0 kPa to 124.0 kPa)
+                    current_pressure = round(110.0 + random.uniform(-3.5, 12.0), 1)
+                    alarms.append("OCCLUSION_DOWNSTREAM")
+                    alarms.append("PRESSURE_HIGH")
                 else:
-                    # Normal physiological infusion pressure
-                    pressure_fluctuation = random.uniform(-1.2, 1.5)
-                    current_pressure = round(pump["base_pressure"] + pressure_fluctuation, 1)
+                    # Normal physiological pressure range (32.0 kPa to 44.0 kPa)
+                    current_pressure = round(pump["base_pressure"] + random.uniform(-2.0, 2.5), 1)
 
                 # 3. Calculate remaining time
                 remaining_vol = max(0.0, pump["vtbi"] - pump["volume_delivered"])
                 time_remaining_sec = int((remaining_vol / pump["base_rate"]) * 3600) if pump["base_rate"] > 0 else 0
-
-                # 4. Check alarm triggers
-                alarms = []
-                if pump.get("force_alarm") or current_pressure > 100.0:
-                    alarms.append("OCCLUSION_DOWNSTREAM")
-                    alarms.append("PRESSURE_HIGH")
 
                 payload = {
                     "pump_id": pump["pump_id"],
@@ -121,7 +134,7 @@ def simulation_loop():
                 topic = f"hospitals/hosp-001/wards/{pump['ward']}/pumps/{pump['pump_id']}/telemetry"
                 client.publish(topic, json.dumps(payload))
 
-            time.sleep(1)  # Broadcast telemetry stream once every second
+            time.sleep(1)  # Broadcast telemetry stream every second
         except Exception as err:
             print(f"[!] Error in Cloud Telemetry Generator: {err}")
             time.sleep(2)
