@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.core.database import SessionLocal
+from app.core.database import engine, Base, SessionLocal
 from app.mqtt.worker import start_mqtt_worker
 from app.simulator_runner import start_cloud_simulator
 from app.models.models import Ward, Bed, Pump, Patient, Admission, DeviceAssociation, PumpTelemetryLog
@@ -33,6 +34,10 @@ def get_db():
 
 @app.on_event("startup")
 async def startup_event():
+    # 1. Create all missing tables in PostgreSQL
+    Base.metadata.create_all(bind=engine)
+    
+    # 2. Start background services
     start_mqtt_worker()
     start_cloud_simulator()
 
