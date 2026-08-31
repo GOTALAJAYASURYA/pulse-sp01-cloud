@@ -1,31 +1,9 @@
-from sqlalchemy import Column, String, Numeric, SmallInteger, JSON, DateTime, ForeignKey
-from sqlalchemy.dialects.postgresql import UUID
-from datetime import datetime, timezone
-import uuid
-from app.core.database import Base
-
-#new----------------------
-
-from sqlalchemy import Column, String, Float, DateTime, ForeignKey, Integer, JSON, Text
-from sqlalchemy.dialects.postgresql import UUID
-from app.core.database import Base
 import uuid
 from datetime import datetime, timezone
+from sqlalchemy import Column, String, Numeric, SmallInteger, JSON, DateTime, ForeignKey, Text
+from sqlalchemy.dialects.postgresql import UUID
+from app.core.database import Base
 
-class DiagnosticReport(Base):
-    __tablename__ = "diagnostic_reports"
-
-    report_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    patient_id = Column(String, ForeignKey("patients.patient_id"), nullable=False)
-    admission_id = Column(UUID(as_uuid=True), nullable=True)
-    department = Column(String, nullable=False)  # PATHOLOGY, RADIOLOGY, etc.
-    test_name = Column(String, nullable=False)    # e.g., "Complete Blood Count (CBC)"
-    parameters = Column(JSON, nullable=True)     # e.g., {"Hb": "12.8", "WBC": "8500", "Platelets": "210k"}
-    technician_notes = Column(Text, nullable=True)
-    technician_name = Column(String, default="Lab Staff")
-    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-#new--------------------------
 class Ward(Base):
     __tablename__ = "wards"
     ward_id = Column(String(64), primary_key=True)
@@ -82,3 +60,15 @@ class PumpTelemetryLog(Base):
     pressure_kpa = Column(Numeric(6, 2))
     battery_pct = Column(SmallInteger)
     alarms = Column(JSON, default=list)
+
+class DiagnosticReport(Base):
+    __tablename__ = "diagnostic_reports"
+    report_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    patient_id = Column(String(64), ForeignKey("patients.patient_id"), nullable=False)
+    admission_id = Column(UUID(as_uuid=True), ForeignKey("admissions.admission_id"), nullable=True)
+    department = Column(String(50), nullable=False)  # PATHOLOGY, RADIOLOGY, etc.
+    test_name = Column(String(100), nullable=False)   # e.g., "Complete Blood Count (CBC)"
+    parameters = Column(JSON, nullable=True)         # e.g., {"Hb": "12.8", "WBC": "8500", "Platelets": "210k"}
+    technician_notes = Column(Text, nullable=True)
+    technician_name = Column(String(100), default="Diagnostic Staff")
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
