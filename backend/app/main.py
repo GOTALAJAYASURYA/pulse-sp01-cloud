@@ -204,7 +204,7 @@ def pair_device(req: PairRequest, db: Session = Depends(get_db)):
         if not patient:
             name_parts = req.patient_name.strip().split(" ", 1)
             first_name = name_parts[0] if name_parts[0] else "Patient"
-            last_name = name_parts[1] if len(name_parts) > 1 else "Doe"
+            last_name = name_parts[1] if len(name_parts) > 1 else ""  # Clean empty string
 
             patient = Patient(
                 patient_id=req.patient_mrn,
