@@ -6,7 +6,7 @@ import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianG
 import { 
   ShieldCheck, Volume2, VolumeX, QrCode, 
   AlertTriangle, CheckCircle2, X, History, Camera, LogOut, 
-  Sparkles, UserPlus, FolderClock, Upload
+  Sparkles, UserPlus, FolderClock, Upload, FlaskConical, FileText, Printer
 } from 'lucide-react';
 import { Html5Qrcode } from 'html5-qrcode';
 
@@ -69,7 +69,20 @@ export default function SmartWardCentral() {
   const [historyLogs, setHistoryLogs] = useState<any[]>([]);
   const [scanStatus, setScanStatus] = useState<string>('Initializing Camera...');
 
-  // Form States with 'ABC' as default Patient Name
+  // Lab & Dossier States
+  const [showLabModal, setShowLabModal] = useState(false);
+  const [showDossierModal, setShowDossierModal] = useState(false);
+  const [selectedPatientDossier, setSelectedPatientDossier] = useState<any>(null);
+  const [labMrn, setLabMrn] = useState('');
+  const [labDept, setLabDept] = useState('PATHOLOGY');
+  const [labTestName, setLabTestName] = useState('Complete Blood Count (CBC)');
+  const [labHb, setLabHb] = useState('12.5');
+  const [labWbc, setLabWbc] = useState('7800');
+  const [labPlatelets, setLabPlatelets] = useState('220000');
+  const [labNotes, setLabNotes] = useState('');
+  const [labLoading, setLabLoading] = useState(false);
+
+  // Form States
   const [formBed, setFormBed] = useState('ICU-B1');
   const [formMrn, setFormMrn] = useState('PTN-000001');
   const [formName, setFormName] = useState('ABC');
@@ -78,7 +91,6 @@ export default function SmartWardCentral() {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const html5QrCodeRef = useRef<Html5Qrcode | null>(null);
 
-  // Fetch Ward Registry & Update Auto-Increment State
   const fetchRegistry = async () => {
     try {
       const res = await fetch(`${API_BASE}/api/v1/registry-status`);
@@ -149,7 +161,6 @@ export default function SmartWardCentral() {
     return () => ws.close();
   }, [audioEnabled]);
 
-  // Decode QR String Helper
   const handleDecodedString = async (decodedText: string) => {
     let bed = formBed;
     let mrn = formMrn;
@@ -185,7 +196,6 @@ export default function SmartWardCentral() {
     setShowPairModal(true);
   };
 
-  // Direct Camera Scanner Lifecycle
   useEffect(() => {
     if (!showCameraScanner) return;
     setScanStatus('Requesting Camera Access...');
@@ -218,7 +228,6 @@ export default function SmartWardCentral() {
     };
   }, [showCameraScanner]);
 
-  // Image / File QR Code Scanner
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -283,6 +292,54 @@ export default function SmartWardCentral() {
     } catch (e) {}
   };
 
+  const handleAttachReport = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLabLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/reports/attach`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          patient_mrn: labMrn.trim(),
+          department: labDept,
+          test_name: labTestName,
+          parameters: labDept === 'PATHOLOGY' 
+            ? { 'Hemoglobin (g/dL)': labHb, 'WBC (/mcL)': labWbc, 'Platelets (/mcL)': labPlatelets }
+            : { 'Scan Type': labTestName, 'Observation': labNotes },
+          technician_notes: labNotes,
+          technician_name: 'Diagnostic Centre Staff'
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.status === 'success') {
+        alert('Diagnostic Report attached successfully to patient record.');
+        setShowLabModal(false);
+        setLabNotes('');
+      } else {
+        alert(data.detail || data.message || 'Failed to attach report.');
+      }
+    } catch (err: any) {
+      alert(`Network Error: ${err.message}`);
+    } finally {
+      setLabLoading(false);
+    }
+  };
+
+  const openDossier = async (mrn: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/patient-dossier/${mrn}`);
+      if (res.ok) {
+        const data = await res.json();
+        setSelectedPatientDossier(data);
+        setShowDossierModal(true);
+      } else {
+        alert('Could not retrieve patient dossier.');
+      }
+    } catch (err) {
+      alert('Error fetching patient dossier.');
+    }
+  };
+
   const generatedCompositeQr = `BED:${formBed}|MRN:${formMrn}|NAME:${formName}|PUMP:${formPump}`;
 
   return (
@@ -302,6 +359,17 @@ export default function SmartWardCentral() {
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
+          <button
+            onClick={() => {
+              setLabMrn(beds[0]?.patient_mrn || '');
+              setShowLabModal(true);
+            }}
+            className="flex items-center space-x-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700 transition shadow-sm"
+          >
+            <FlaskConical className="w-4 h-4" />
+            <span>Attach Lab/Scan</span>
+          </button>
+
           <button
             onClick={fetchDischargedRecords}
             className="flex items-center space-x-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-amber-600 text-white hover:bg-amber-700 transition shadow-sm"
@@ -382,6 +450,13 @@ export default function SmartWardCentral() {
                   </div>
                   <div className="flex items-center space-x-1">
                     <button 
+                      onClick={() => openDossier(b.patient_mrn)}
+                      title="View Complete Clinical Dossier"
+                      className="p-1.5 text-slate-400 hover:text-indigo-600 rounded-lg hover:bg-slate-100"
+                    >
+                      <FileText className="w-4 h-4" />
+                    </button>
+                    <button 
                       onClick={() => setQrTokenModal({ title: `${b.bed_number} Composite Token`, value: `BED:${b.bed_number}|MRN:${b.patient_mrn}|NAME:${b.patient_name}|PUMP:${b.pump_id}` })} 
                       title="View QR Token"
                       className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100"
@@ -398,12 +473,20 @@ export default function SmartWardCentral() {
                   </div>
                 </div>
 
-                <div className="mt-3">
-                  <h2 className="text-sm font-bold text-slate-800">{b.patient_name}</h2>
-                  <div className="flex items-center justify-between mt-0.5">
+                <div className="mt-3 flex justify-between items-start">
+                  <div>
+                    <h2 className="text-sm font-bold text-slate-800">{b.patient_name}</h2>
                     <span className="text-xs text-slate-400 font-mono">Pump: {b.pump_id}</span>
-                    <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">Assigned</span>
                   </div>
+                  <button
+                    onClick={() => {
+                      setLabMrn(b.patient_mrn);
+                      setShowLabModal(true);
+                    }}
+                    className="text-[11px] font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2 py-1 rounded-lg transition flex items-center gap-1"
+                  >
+                    <FlaskConical className="w-3 h-3" /> + Lab/Scan
+                  </button>
                 </div>
 
                 <div className={`mt-4 p-4 rounded-xl border ${hasAlarm ? 'bg-red-50 border-red-200' : 'bg-slate-50 border-slate-100'}`}>
@@ -444,18 +527,196 @@ export default function SmartWardCentral() {
 
               <div className="mt-6 pt-3 border-t border-slate-100 flex items-center justify-between">
                 <span className="text-[11px] text-slate-400">Paired: {b.paired_at ? new Date(b.paired_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Active'}</span>
-                <button
-                  onClick={() => handleDischarge(b.pump_id)}
-                  className="flex items-center space-x-1 text-xs font-semibold text-rose-600 hover:text-rose-700 bg-rose-50 px-2.5 py-1 rounded-lg border border-rose-200 hover:bg-rose-100 transition"
-                >
-                  <LogOut className="w-3.5 h-3.5" />
-                  <span>Discharge Patient</span>
-                </button>
+                <div className="flex gap-1.5">
+                  <button
+                    onClick={() => openDossier(b.patient_mrn)}
+                    className="text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-1 rounded-lg border border-indigo-200 transition"
+                  >
+                    Dossier
+                  </button>
+                  <button
+                    onClick={() => handleDischarge(b.pump_id)}
+                    className="flex items-center space-x-1 text-xs font-semibold text-rose-600 hover:text-rose-700 bg-rose-50 px-2.5 py-1 rounded-lg border border-rose-200 hover:bg-rose-100 transition"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    <span>Discharge</span>
+                  </button>
+                </div>
               </div>
             </div>
           );
         })}
       </div>
+
+      {/* MODAL: Attach Lab & Diagnostic Reports */}
+      {showLabModal && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-100">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center space-x-2">
+                <FlaskConical className="w-5 h-5 text-emerald-600" />
+                <h3 className="text-base font-bold text-slate-900">Attach Diagnostic / Lab Report</h3>
+              </div>
+              <button onClick={() => setShowLabModal(false)} className="text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
+            </div>
+
+            <form onSubmit={handleAttachReport} className="mt-4 space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Target Patient MRN</label>
+                <input
+                  value={labMrn}
+                  onChange={(e) => setLabMrn(e.target.value)}
+                  placeholder="e.g. PTN-000001"
+                  required
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Department</label>
+                  <select
+                    value={labDept}
+                    onChange={(e) => {
+                      setLabDept(e.target.value);
+                      if (e.target.value === 'RADIOLOGY') setLabTestName('Chest X-Ray AP View');
+                      else setLabTestName('Complete Blood Count (CBC)');
+                    }}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none"
+                  >
+                    <option value="PATHOLOGY">Pathology (Blood/Urine)</option>
+                    <option value="RADIOLOGY">Radiology (X-Ray/Scans)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Investigation Name</label>
+                  <input
+                    value={labTestName}
+                    onChange={(e) => setLabTestName(e.target.value)}
+                    required
+                    className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {labDept === 'PATHOLOGY' ? (
+                <div className="grid grid-cols-3 gap-2 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-500">Hb (g/dL)</label>
+                    <input value={labHb} onChange={(e) => setLabHb(e.target.value)} className="w-full px-2 py-1 bg-white rounded border text-xs mt-1" />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-500">WBC (/mcL)</label>
+                    <input value={labWbc} onChange={(e) => setLabWbc(e.target.value)} className="w-full px-2 py-1 bg-white rounded border text-xs mt-1" />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-500">Platelets</label>
+                    <input value={labPlatelets} onChange={(e) => setLabPlatelets(e.target.value)} className="w-full px-2 py-1 bg-white rounded border text-xs mt-1" />
+                  </div>
+                </div>
+              ) : null}
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Technician / Radiologist Notes</label>
+                <textarea
+                  value={labNotes}
+                  onChange={(e) => setLabNotes(e.target.value)}
+                  rows={2}
+                  placeholder="e.g. Normal morphology or clear bilateral lung fields"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={labLoading}
+                className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-sm font-bold transition shadow-sm"
+              >
+                {labLoading ? 'Saving...' : 'Attach Report to Patient'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Comprehensive Patient Clinical Dossier */}
+      {showDossierModal && selectedPatientDossier && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-2xl border border-slate-100 max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+              <div className="flex items-center space-x-2">
+                <FileText className="w-5 h-5 text-indigo-600" />
+                <div>
+                  <h3 className="text-lg font-bold text-slate-900">{selectedPatientDossier.patient_name}</h3>
+                  <span className="text-xs font-mono bg-indigo-50 text-indigo-700 font-bold px-2 py-0.5 rounded border border-indigo-200">
+                    MRN: {selectedPatientDossier.patient_mrn}
+                  </span>
+                </div>
+              </div>
+              <button onClick={() => setShowDossierModal(false)} className="text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
+            </div>
+
+            <div className="mt-4 flex-1 overflow-y-auto space-y-3">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                Attached Diagnostics & Investigations ({selectedPatientDossier.total_reports})
+              </h4>
+
+              {selectedPatientDossier.reports?.length === 0 ? (
+                <div className="p-8 text-center text-slate-400 text-sm bg-slate-50 rounded-xl">
+                  No diagnostic reports attached yet. Use the Lab/Scan action button to record reports.
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {selectedPatientDossier.reports?.map((rpt: any) => (
+                    <div key={rpt.report_id} className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
+                      <div className="flex justify-between items-center">
+                        <span className="font-bold text-slate-800 text-sm">{rpt.test_name}</span>
+                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">
+                          {rpt.department}
+                        </span>
+                      </div>
+
+                      {rpt.parameters && (
+                        <div className="grid grid-cols-3 gap-2 bg-white p-2 rounded-lg border border-slate-200 text-xs">
+                          {Object.entries(rpt.parameters).map(([k, v]: any) => (
+                            <div key={k}>
+                              <span className="text-slate-400 block text-[10px]">{k}</span>
+                              <span className="font-bold text-slate-800">{v}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {rpt.notes && <p className="text-xs text-slate-600 italic">"{rpt.notes}"</p>}
+
+                      <div className="text-[10px] text-slate-400 flex justify-between pt-1 border-t border-slate-200/60">
+                        <span>Staff: {rpt.technician}</span>
+                        <span>{new Date(rpt.created_at).toLocaleString()}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="mt-4 pt-3 border-t border-slate-100 flex justify-between">
+              <button
+                onClick={() => window.print()}
+                className="flex items-center space-x-1.5 px-4 py-2 bg-slate-800 text-white rounded-xl text-xs font-bold hover:bg-slate-900 transition"
+              >
+                <Printer className="w-4 h-4" />
+                <span>Print Official Dossier</span>
+              </button>
+              <button
+                onClick={() => setShowDossierModal(false)}
+                className="px-4 py-2 bg-slate-100 text-slate-700 rounded-xl text-xs font-bold hover:bg-slate-200"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* MODAL: Direct Camera & File QR Scanner */}
       {showCameraScanner && (
@@ -551,7 +812,16 @@ export default function SmartWardCentral() {
                           {rec.total_volume_ml.toFixed(1)} mL
                           <span className="block text-[10px] text-slate-400">Avg Pres: {rec.avg_pressure_kpa} kPa</span>
                         </td>
-                        <td className="p-3 text-right">
+                        <td className="p-3 text-right space-x-1.5">
+                          <button
+                            onClick={() => {
+                              setShowDischargedModal(false);
+                              openDossier(rec.patient_id);
+                            }}
+                            className="px-2.5 py-1 text-xs font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg hover:bg-emerald-100"
+                          >
+                            Dossier
+                          </button>
                           <button
                             onClick={() => {
                               setShowDischargedModal(false);
@@ -559,7 +829,7 @@ export default function SmartWardCentral() {
                             }}
                             className="px-2.5 py-1 text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg hover:bg-indigo-100"
                           >
-                            View Telemetry
+                            Telemetry
                           </button>
                         </td>
                       </tr>
