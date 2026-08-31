@@ -13,7 +13,7 @@ from sqlalchemy import text
 from app.core.database import SessionLocal, engine, Base
 from app.mqtt.worker import start_mqtt_worker
 from app.simulator_runner import start_cloud_simulator
-from app.models.models import Ward, Bed, Pump, Patient, Admission, DeviceAssociation, PumpTelemetryLog
+from app.models.models import Ward, Bed, Pump, Patient, Admission, DeviceAssociation, PumpTelemetryLog, DiagnosticReport
 
 # Create all database tables immediately on startup
 Base.metadata.create_all(bind=engine)
@@ -49,6 +49,16 @@ class PairRequest(BaseModel):
 
 class DischargeRequest(BaseModel):
     pump_id: str
+
+class ReportAttachRequest(BaseModel):
+    patient_mrn: str
+    department: str
+    test_name: str
+    parameters: dict
+    technician_notes: str = ""
+    technician_name: str = "Lab Clinician"
+
+
 
 # --- REST Endpoints ---
 
@@ -342,6 +352,75 @@ def get_discharged_records(db: Session = Depends(get_db)):
 
 # --- WebSockets ---
 connected_websockets = set()
+
+@app.post("/api/v1/reports/attach")
+def attach_diagnostic_report(req: ReportAttachRequest, db: Session = Depends(get_db)):
+    """Attach Blood/Lab/Scan reports to the patient encounter via MRN."""
+    try:
+        patient = db.query(Patient).filter(Patient.patient_id == req.patient_mrn).first()
+        if not patient:
+            raise HTTPException(status_code=404, detail=f"Patient with MRN '{req.patient_mrn}' not found.")
+
+        active_adm = db.query(Admission).filter(
+            Admission.patient_id == patient.patient_id,
+            Admission.status == "ADMITTED"
+        ).first()
+
+        report = DiagnosticReport(
+            report_id=uuid.uuid4(),
+            patient_id=patient.patient_id,
+            admission_id=active_adm.admission_id if active_adm else None,
+            department=req.department.upper(),
+            test_name=req.test_name,
+            parameters=req.parameters,
+            technician_notes=req.technician_notes,
+            technician_name=req.technician_name,
+            created_at=datetime.now(timezone.utc)
+        )
+        db.add(report)
+        db.commit()
+        return {"status": "success", "report_id": str(report.report_id)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        return {"status": "error", "message": str(e)}
+
+@app.get("/api/v1/patient-dossier/{patient_id}")
+def get_patient_dossier(patient_id: str, db: Session = Depends(get_db)):
+    """Fetch complete patient dossier including demographics and all attached diagnostic reports."""
+    try:
+        patient = db.query(Patient).filter(Patient.patient_id == patient_id).first()
+        if not patient:
+            raise HTTPException(status_code=404, detail="Patient not found")
+
+        reports = db.query(DiagnosticReport).filter(
+            DiagnosticReport.patient_id == patient_id
+        ).order_by(DiagnosticReport.created_at.desc()).all()
+
+        reports_list = [
+            {
+                "report_id": str(r.report_id),
+                "department": r.department,
+                "test_name": r.test_name,
+                "parameters": r.parameters or {},
+                "notes": r.technician_notes,
+                "technician": r.technician_name,
+                "created_at": r.created_at.isoformat() if r.created_at else None
+            }
+            for r in reports
+        ]
+
+        return {
+            "patient_mrn": patient.patient_id,
+            "patient_name": f"{patient.first_name} {patient.last_name}",
+            "total_reports": len(reports_list),
+            "reports": reports_list
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 
 @app.websocket("/ws/telemetry")
 async def websocket_telemetry_endpoint(websocket: WebSocket):
