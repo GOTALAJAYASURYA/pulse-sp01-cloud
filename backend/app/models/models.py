@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, Numeric, SmallInteger, JSON, DateTime, ForeignKey, Text
+from sqlalchemy import Column, String, Numeric, SmallInteger, Integer, JSON, DateTime, ForeignKey, Text
 from sqlalchemy.dialects.postgresql import UUID
 from app.core.database import Base
 
@@ -29,15 +29,24 @@ class Patient(Base):
     __tablename__ = "patients"
     patient_id = Column(String(64), primary_key=True)
     first_name = Column(String(100), nullable=False)
-    last_name = Column(String(100), nullable=False)
+    last_name = Column(String(100), default="")
+    age = Column(Integer, nullable=True)
+    gender = Column(String(20), default="Male")
+    blood_group = Column(String(10), default="O+")
+    phone_number = Column(String(25), nullable=True)
+    address = Column(Text, nullable=True)
 
 class Admission(Base):
     __tablename__ = "admissions"
     admission_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     patient_id = Column(String(64), ForeignKey("patients.patient_id"))
     bed_id = Column(String(64), ForeignKey("beds.bed_id"))
-    primary_diagnosis = Column(String, nullable=False)
+    primary_diagnosis = Column(String, default="Clinical Monitoring & Infusion")
+    admission_type = Column(String(50), default="Emergency") # Emergency, Elective, ICU Transfer, Trauma
+    attending_doctor = Column(String(100), default="Duty Medical Officer")
     admitted_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    discharge_type = Column(String(50), nullable=True) # Routine, Transferred, DOR, LAMA
+    discharged_at = Column(DateTime(timezone=True), nullable=True)
     status = Column(String(20), default="ADMITTED")
 
 class DeviceAssociation(Base):
@@ -66,9 +75,9 @@ class DiagnosticReport(Base):
     report_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     patient_id = Column(String(64), ForeignKey("patients.patient_id"), nullable=False)
     admission_id = Column(UUID(as_uuid=True), ForeignKey("admissions.admission_id"), nullable=True)
-    department = Column(String(50), nullable=False)  # PATHOLOGY, RADIOLOGY, etc.
-    test_name = Column(String(100), nullable=False)   # e.g., "Complete Blood Count (CBC)"
-    parameters = Column(JSON, nullable=True)         # e.g., {"Hb": "12.8", "WBC": "8500", "Platelets": "210k"}
+    department = Column(String(50), nullable=False)
+    test_name = Column(String(100), nullable=False)
+    parameters = Column(JSON, nullable=True)
     technician_notes = Column(Text, nullable=True)
-    technician_name = Column(String(100), default="Diagnostic Staff")
+    technician_name = Column(String(100), default="Lab Clinician")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
