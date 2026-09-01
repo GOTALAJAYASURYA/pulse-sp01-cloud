@@ -1,5 +1,5 @@
 'use client';
-#page
+
 import React, { useEffect, useState, useRef } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from 'recharts';
@@ -88,6 +88,11 @@ export default function SmartWardCentral() {
   const [labNotes, setLabNotes] = useState('');
   const [labLoading, setLabLoading] = useState(false);
 
+  // Lab Embedded Camera States
+  const [labCameraActive, setLabCameraActive] = useState(false);
+  const [labScanStatus, setLabScanStatus] = useState('Position patient QR in front of camera...');
+  const labQrScannerRef = useRef<Html5Qrcode | null>(null);
+
   // Form States (Hospital Clinical Intake)
   const [formBed, setFormBed] = useState('ICU-B1');
   const [formMrn, setFormMrn] = useState('PTN-000001');
@@ -174,6 +179,20 @@ export default function SmartWardCentral() {
     return () => ws.close();
   }, [audioEnabled]);
 
+  const extractMrnFromQr = (decodedText: string): string => {
+    let foundMrn = decodedText.trim();
+    if (decodedText.includes('|')) {
+      const parts = decodedText.split('|');
+      parts.forEach((p) => {
+        const [k, v] = p.split(':');
+        if (k === 'MRN') foundMrn = v;
+      });
+    } else if (decodedText.startsWith('MRN:')) {
+      foundMrn = decodedText.replace('MRN:', '');
+    }
+    return foundMrn;
+  };
+
   const handleDecodedString = async (decodedText: string) => {
     let bed = formBed;
     let mrn = formMrn;
@@ -240,6 +259,44 @@ export default function SmartWardCentral() {
       }
     };
   }, [showCameraScanner]);
+
+  // Lab Modal Dedicated QR Scanner Lifecycle
+  useEffect(() => {
+    if (!labCameraActive) return;
+    setLabScanStatus('Starting camera scanner...');
+
+    const elementId = 'lab-qr-reader';
+    const timer = setTimeout(async () => {
+      try {
+        const scanner = new Html5Qrcode(elementId);
+        labQrScannerRef.current = scanner;
+
+        await scanner.start(
+          { facingMode: 'environment' },
+          { fps: 15, qrbox: { width: 220, height: 220 } },
+          async (decodedText) => {
+            const mrn = extractMrnFromQr(decodedText);
+            setLabMrn(mrn);
+            if (labQrScannerRef.current?.isScanning) {
+              await labQrScannerRef.current.stop();
+            }
+            setLabCameraActive(false);
+          },
+          () => {}
+        );
+        setLabScanStatus('Scanning... Point at patient wristband or QR token');
+      } catch (err) {
+        setLabScanStatus('Camera unavailable or permission denied.');
+      }
+    }, 200);
+
+    return () => {
+      clearTimeout(timer);
+      if (labQrScannerRef.current && labQrScannerRef.current.isScanning) {
+        labQrScannerRef.current.stop().catch(() => {});
+      }
+    };
+  }, [labCameraActive]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -388,6 +445,7 @@ export default function SmartWardCentral() {
           <button
             onClick={() => {
               setLabMrn(beds[0]?.patient_mrn || '');
+              setLabCameraActive(false);
               setShowLabModal(true);
             }}
             className="flex items-center space-x-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-700 transition shadow-sm"
@@ -510,6 +568,7 @@ export default function SmartWardCentral() {
                   <button
                     onClick={() => {
                       setLabMrn(b.patient_mrn);
+                      setLabCameraActive(false);
                       setShowLabModal(true);
                     }}
                     className="text-[11px] font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2 py-1 rounded-lg transition flex items-center gap-1"
@@ -674,25 +733,68 @@ export default function SmartWardCentral() {
         </div>
       )}
 
-      {/* MODAL: Attach Lab & Diagnostic Reports */}
+      {/* MODAL: Attach Lab & Diagnostic Reports with Embedded Camera QR Scanner */}
       {showLabModal && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-100">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-100 max-h-[92vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center space-x-2">
                 <FlaskConical className="w-5 h-5 text-emerald-600" />
                 <h3 className="text-base font-bold text-slate-900">Attach Diagnostic / Lab Report</h3>
               </div>
-              <button onClick={() => setShowLabModal(false)} className="text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
+              <button 
+                onClick={async () => {
+                  if (labQrScannerRef.current?.isScanning) await labQrScannerRef.current.stop();
+                  setLabCameraActive(false);
+                  setShowLabModal(false);
+                }} 
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
             </div>
+
+            {/* Embedded Live Camera Scanner View */}
+            {labCameraActive && (
+              <div className="mt-3 p-3 bg-slate-950 rounded-xl border border-slate-800 text-center space-y-2">
+                <div className="flex items-center justify-between text-xs text-emerald-400 font-semibold px-1">
+                  <span className="flex items-center gap-1"><Camera className="w-3.5 h-3.5 animate-pulse" /> {labScanStatus}</span>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (labQrScannerRef.current?.isScanning) await labQrScannerRef.current.stop();
+                      setLabCameraActive(false);
+                    }}
+                    className="text-slate-400 hover:text-white text-xs bg-slate-800 px-2 py-0.5 rounded"
+                  >
+                    Close Camera
+                  </button>
+                </div>
+                <div className="rounded-lg overflow-hidden min-h-[200px] flex items-center justify-center bg-black">
+                  <div id="lab-qr-reader" className="w-full h-full" />
+                </div>
+              </div>
+            )}
 
             <form onSubmit={handleAttachReport} className="mt-4 space-y-4">
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Target Patient MRN</label>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="block text-xs font-bold text-slate-700">Target Patient MRN</label>
+                  {!labCameraActive && (
+                    <button
+                      type="button"
+                      onClick={() => setLabCameraActive(true)}
+                      className="flex items-center space-x-1 text-[11px] font-bold text-indigo-600 hover:text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 px-2 py-0.5 rounded-lg transition"
+                    >
+                      <Camera className="w-3.5 h-3.5 text-indigo-600" />
+                      <span>📷 Scan Patient QR</span>
+                    </button>
+                  )}
+                </div>
                 <input
                   value={labMrn}
                   onChange={(e) => setLabMrn(e.target.value)}
-                  placeholder="e.g. PTN-000001"
+                  placeholder="Scan QR or enter e.g. PTN-000001"
                   required
                   className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none"
                 />
