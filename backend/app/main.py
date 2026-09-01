@@ -16,8 +16,25 @@ from app.mqtt.worker import start_mqtt_worker
 from app.simulator_runner import start_cloud_simulator
 from app.models.models import Ward, Bed, Pump, Patient, Admission, DeviceAssociation, PumpTelemetryLog, DiagnosticReport
 
-# Ensure tables exist
+# Create all database tables immediately on startup
 Base.metadata.create_all(bind=engine)
+
+def run_db_migrations():
+    """Auto-migrate existing tables with newly added clinical columns."""
+    with engine.connect() as conn:
+        conn.execute(text("""
+            ALTER TABLE patients ADD COLUMN IF NOT EXISTS age INTEGER;
+            ALTER TABLE patients ADD COLUMN IF NOT EXISTS gender VARCHAR(20) DEFAULT 'Male';
+            ALTER TABLE patients ADD COLUMN IF NOT EXISTS blood_group VARCHAR(10) DEFAULT 'O+';
+            ALTER TABLE patients ADD COLUMN IF NOT EXISTS phone_number VARCHAR(25);
+            ALTER TABLE patients ADD COLUMN IF NOT EXISTS address TEXT;
+
+            ALTER TABLE admissions ADD COLUMN IF NOT EXISTS admission_type VARCHAR(50) DEFAULT 'Emergency';
+            ALTER TABLE admissions ADD COLUMN IF NOT EXISTS attending_doctor VARCHAR(100) DEFAULT 'Duty Medical Officer';
+            ALTER TABLE admissions ADD COLUMN IF NOT EXISTS discharge_type VARCHAR(50);
+            ALTER TABLE admissions ADD COLUMN IF NOT EXISTS discharged_at TIMESTAMP WITH TIME ZONE;
+        """))
+        conn.commit()
 
 app = FastAPI(title="Pulse Enterprise HIS & Telemetry Suite")
 
@@ -38,6 +55,10 @@ def get_db():
 
 @app.on_event("startup")
 def startup_event():
+    try:
+        run_db_migrations()
+    except Exception as e:
+        print(f"[!] Migration warning: {e}")
     start_mqtt_worker()
     start_cloud_simulator()
 
