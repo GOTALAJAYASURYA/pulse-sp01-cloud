@@ -6,7 +6,7 @@ import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianG
 import { 
   ShieldCheck, Volume2, VolumeX, QrCode, 
   AlertTriangle, CheckCircle2, X, History, Camera, LogOut, 
-  Sparkles, UserPlus, FolderClock, Upload, FlaskConical, FileText, Printer
+  Sparkles, UserPlus, FolderClock, Upload, FlaskConical, FileText, Printer, Building2, User
 } from 'lucide-react';
 import { Html5Qrcode } from 'html5-qrcode';
 
@@ -20,6 +20,11 @@ interface ActiveBed {
   patient_mrn: string;
   patient_name: string;
   paired_at: string;
+  age?: number;
+  gender?: string;
+  blood_group?: string;
+  admission_type?: string;
+  attending_doctor?: string;
 }
 
 interface DischargedRecord {
@@ -30,6 +35,7 @@ interface DischargedRecord {
   pump_id: string;
   paired_at: string;
   discharged_at: string;
+  discharge_type?: string;
   total_volume_ml: number;
   avg_pressure_kpa: number;
   session_points: number;
@@ -76,17 +82,25 @@ export default function SmartWardCentral() {
   const [labMrn, setLabMrn] = useState('');
   const [labDept, setLabDept] = useState('PATHOLOGY');
   const [labTestName, setLabTestName] = useState('Complete Blood Count (CBC)');
-  const [labHb, setLabHb] = useState('12.5');
+  const [labHb, setLabHb] = useState('13.2');
   const [labWbc, setLabWbc] = useState('7800');
   const [labPlatelets, setLabPlatelets] = useState('220000');
   const [labNotes, setLabNotes] = useState('');
   const [labLoading, setLabLoading] = useState(false);
 
-  // Form States
+  // Form States (Hospital Clinical Intake)
   const [formBed, setFormBed] = useState('ICU-B1');
   const [formMrn, setFormMrn] = useState('PTN-000001');
-  const [formName, setFormName] = useState('ABC');
+  const [formName, setFormName] = useState('RAGHU');
   const [formPump, setFormPump] = useState('SP01-2026-0001');
+  const [formAge, setFormAge] = useState<number>(45);
+  const [formGender, setFormGender] = useState('Male');
+  const [formBloodGroup, setFormBloodGroup] = useState('O+');
+  const [formPhone, setFormPhone] = useState('+91 98765 43210');
+  const [formAddress, setFormAddress] = useState('Flat 402, Green Meadows, Vizag');
+  const [formAdmissionType, setFormAdmissionType] = useState('Emergency');
+  const [formDoctor, setFormDoctor] = useState('Dr. Robert Vance');
+  const [formDiagnosis, setFormDiagnosis] = useState('Acute Hemodynamic Monitoring');
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const html5QrCodeRef = useRef<Html5Qrcode | null>(null);
@@ -102,7 +116,6 @@ export default function SmartWardCentral() {
           setFormBed(data.next_suggestions.bed);
           setFormMrn(data.next_suggestions.mrn);
           setFormPump(data.next_suggestions.pump);
-          setFormName(data.next_suggestions.name || 'ABC');
         }
       }
     } catch (e) {
@@ -186,7 +199,7 @@ export default function SmartWardCentral() {
 
     setFormBed(bed);
     setFormMrn(mrn);
-    setFormName(name || 'ABC');
+    setFormName(name);
     setFormPump(pump);
 
     if (html5QrCodeRef.current?.isScanning) {
@@ -216,7 +229,7 @@ export default function SmartWardCentral() {
         );
         setScanStatus('Camera Active: Point at QR Code');
       } catch (err: any) {
-        setScanStatus('Camera unavailable or permission denied. You can upload an image below.');
+        setScanStatus('Camera unavailable. You can upload a QR image below.');
       }
     }, 200);
 
@@ -237,7 +250,7 @@ export default function SmartWardCentral() {
       const decodedText = await html5QrCode.scanFile(file, true);
       handleDecodedString(decodedText);
     } catch (err) {
-      alert('Could not decode QR code from this image. Please ensure it is clear.');
+      alert('Could not decode QR code from this image.');
     }
   };
 
@@ -250,8 +263,16 @@ export default function SmartWardCentral() {
         body: JSON.stringify({
           bed_number: formBed,
           patient_mrn: formMrn,
-          patient_name: formName,
-          pump_id: formPump
+          patient_name: formName.trim(),
+          pump_id: formPump,
+          age: Number(formAge),
+          gender: formGender,
+          blood_group: formBloodGroup,
+          phone_number: formPhone,
+          address: formAddress,
+          admission_type: formAdmissionType,
+          attending_doctor: formDoctor,
+          primary_diagnosis: formDiagnosis
         })
       });
       const data = await res.json();
@@ -260,7 +281,7 @@ export default function SmartWardCentral() {
         setShowQrStudio(false);
         await fetchRegistry();
       } else {
-        alert(data.detail || data.message || 'Error pairing device');
+        alert(data.detail || data.message || 'Error admitting patient');
       }
     } catch (err) {
       alert('Network error connecting to backend.');
@@ -268,12 +289,17 @@ export default function SmartWardCentral() {
   };
 
   const handleDischarge = async (pumpId: string) => {
-    if (!confirm(`Discharge patient and release Syringe Pump ${pumpId}? Session will be permanently logged to clinical history.`)) return;
+    const dischargeReason = prompt(
+      "Enter Discharge Type:\n1. Routine / Recovered\n2. Referred / Transferred\n3. Discharged on Request (DOR)\n4. LAMA", 
+      "Routine / Recovered"
+    );
+    if (!dischargeReason) return;
+
     try {
       await fetch(`${API_BASE}/api/v1/discharge`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pump_id: pumpId })
+        body: JSON.stringify({ pump_id: pumpId, discharge_type: dischargeReason })
       });
       fetchRegistry();
     } catch (err) {
@@ -305,14 +331,14 @@ export default function SmartWardCentral() {
           test_name: labTestName,
           parameters: labDept === 'PATHOLOGY' 
             ? { 'Hemoglobin (g/dL)': labHb, 'WBC (/mcL)': labWbc, 'Platelets (/mcL)': labPlatelets }
-            : { 'Scan Type': labTestName, 'Observation': labNotes },
+            : { 'Scan Modality': labTestName, 'Clinical Findings': labNotes },
           technician_notes: labNotes,
-          technician_name: 'Diagnostic Centre Staff'
+          technician_name: 'Central Diagnostic Wing'
         })
       });
       const data = await res.json();
       if (res.ok && data.status === 'success') {
-        alert('Diagnostic Report attached successfully to patient record.');
+        alert('Diagnostic Report attached to patient record.');
         setShowLabModal(false);
         setLabNotes('');
       } else {
@@ -476,7 +502,10 @@ export default function SmartWardCentral() {
                 <div className="mt-3 flex justify-between items-start">
                   <div>
                     <h2 className="text-sm font-bold text-slate-800">{b.patient_name}</h2>
-                    <span className="text-xs text-slate-400 font-mono">Pump: {b.pump_id}</span>
+                    <div className="text-[11px] text-slate-500 mt-0.5">
+                      <span>{b.age || 45} Y / {b.gender || 'M'}</span> • <span className="font-semibold text-rose-600">{b.blood_group || 'O+'}</span>
+                    </div>
+                    <span className="text-xs text-slate-400 font-mono block mt-1">Pump: {b.pump_id}</span>
                   </div>
                   <button
                     onClick={() => {
@@ -548,6 +577,103 @@ export default function SmartWardCentral() {
         })}
       </div>
 
+      {/* MODAL: Clinical Inpatient Admission (Demographics & Vitals) */}
+      {showPairModal && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl max-w-xl w-full p-6 shadow-2xl border border-slate-100 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">Patient Clinical Admission</h3>
+                <p className="text-xs text-slate-500">Record full inpatient demographic & encounter details.</p>
+              </div>
+              <button onClick={() => setShowPairModal(false)} className="text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
+            </div>
+
+            <form onSubmit={handlePair} className="mt-4 space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">ICU Bed Station</label>
+                  <input value={formBed} onChange={(e) => setFormBed(e.target.value)} required className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Syringe Pump Serial ID</label>
+                  <input value={formPump} onChange={(e) => setFormPump(e.target.value)} required className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm font-mono focus:outline-none" />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Patient MRN (Auto-ID)</label>
+                  <input value={formMrn} onChange={(e) => setFormMrn(e.target.value)} required className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm font-mono focus:outline-none bg-slate-50" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Patient Full Name</label>
+                  <input value={formName} onChange={(e) => setFormName(e.target.value)} required placeholder="e.g. RAGHU" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none" />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Age (Years)</label>
+                  <input type="number" value={formAge} onChange={(e) => setFormAge(Number(e.target.value))} required className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Gender</label>
+                  <select value={formGender} onChange={(e) => setFormGender(e.target.value)} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none">
+                    <option value="Male">Male</option>
+                    <option value="Female">Female</option>
+                    <option value="Other">Other</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Blood Group</label>
+                  <select value={formBloodGroup} onChange={(e) => setFormBloodGroup(e.target.value)} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm font-bold text-rose-600 focus:outline-none">
+                    <option value="A+">A+</option>
+                    <option value="A-">A-</option>
+                    <option value="B+">B+</option>
+                    <option value="B-">B-</option>
+                    <option value="AB+">AB+</option>
+                    <option value="AB-">AB-</option>
+                    <option value="O+">O+</option>
+                    <option value="O-">O-</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Admission Type</label>
+                  <select value={formAdmissionType} onChange={(e) => setFormAdmissionType(e.target.value)} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none">
+                    <option value="Emergency">Emergency</option>
+                    <option value="Elective / Planned">Elective / Planned</option>
+                    <option value="ICU Transfer">ICU Transfer</option>
+                    <option value="Trauma / Critical">Trauma / Critical</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Attending Doctor</label>
+                  <input value={formDoctor} onChange={(e) => setFormDoctor(e.target.value)} required className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none" />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Contact Phone Number</label>
+                <input value={formPhone} onChange={(e) => setFormPhone(e.target.value)} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none" />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Residential Address</label>
+                <input value={formAddress} onChange={(e) => setFormAddress(e.target.value)} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none" />
+              </div>
+
+              <button type="submit" className="w-full py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-bold hover:bg-indigo-700 transition mt-2">
+                Admit Patient & Bind Syringe Pump
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* MODAL: Attach Lab & Diagnostic Reports */}
       {showLabModal && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
@@ -568,7 +694,7 @@ export default function SmartWardCentral() {
                   onChange={(e) => setLabMrn(e.target.value)}
                   placeholder="e.g. PTN-000001"
                   required
-                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none"
                 />
               </div>
 
@@ -617,12 +743,12 @@ export default function SmartWardCentral() {
               ) : null}
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Technician / Radiologist Notes</label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Technician / Radiologist Observation</label>
                 <textarea
                   value={labNotes}
                   onChange={(e) => setLabNotes(e.target.value)}
                   rows={2}
-                  placeholder="e.g. Normal morphology or clear bilateral lung fields"
+                  placeholder="e.g. Normal blood morphology or Clear lung fields"
                   className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:outline-none"
                 />
               </div>
@@ -639,73 +765,106 @@ export default function SmartWardCentral() {
         </div>
       )}
 
-      {/* MODAL: Comprehensive Patient Clinical Dossier */}
+      {/* MODAL: Official Print-Ready Patient Clinical Dossier & Discharge Report */}
       {showDossierModal && selectedPatientDossier && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-2xl border border-slate-100 max-h-[85vh] flex flex-col">
-            <div className="flex items-center justify-between pb-4 border-b border-slate-100">
-              <div className="flex items-center space-x-2">
-                <FileText className="w-5 h-5 text-indigo-600" />
+          <div className="bg-white rounded-2xl max-w-3xl w-full p-8 shadow-2xl border border-slate-100 max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between pb-4 border-b border-slate-200">
+              <div className="flex items-center space-x-3">
+                <Building2 className="w-8 h-8 text-indigo-600" />
                 <div>
-                  <h3 className="text-lg font-bold text-slate-900">{selectedPatientDossier.patient_name}</h3>
-                  <span className="text-xs font-mono bg-indigo-50 text-indigo-700 font-bold px-2 py-0.5 rounded border border-indigo-200">
-                    MRN: {selectedPatientDossier.patient_mrn}
-                  </span>
+                  <h2 className="text-xl font-black text-slate-900 tracking-tight uppercase">Pulse Hospital & Critical Care Network</h2>
+                  <p className="text-xs text-slate-500">Inpatient Clinical Summary & Encounter Audit Dossier</p>
                 </div>
               </div>
-              <button onClick={() => setShowDossierModal(false)} className="text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
+              <button onClick={() => setShowDossierModal(false)} className="text-slate-400 hover:text-slate-600"><X className="w-6 h-6" /></button>
             </div>
 
-            <div className="mt-4 flex-1 overflow-y-auto space-y-3">
-              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                Attached Diagnostics & Investigations ({selectedPatientDossier.total_reports})
-              </h4>
-
-              {selectedPatientDossier.reports?.length === 0 ? (
-                <div className="p-8 text-center text-slate-400 text-sm bg-slate-50 rounded-xl">
-                  No diagnostic reports attached yet. Use the Lab/Scan action button to record reports.
+            <div className="mt-4 flex-1 overflow-y-auto space-y-6 text-slate-800 pr-2">
+              {/* Section 1: Patient Demographics */}
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-indigo-700 mb-3 flex items-center gap-1.5">
+                  <User className="w-4 h-4" /> Patient Demographics & Admission Record
+                </h4>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                  <div><span className="text-slate-400 block text-[10px]">Patient Name</span><span className="font-bold text-sm text-slate-900">{selectedPatientDossier.patient_name}</span></div>
+                  <div><span className="text-slate-400 block text-[10px]">MRN</span><span className="font-mono font-bold text-blue-700">{selectedPatientDossier.patient_mrn}</span></div>
+                  <div><span className="text-slate-400 block text-[10px]">Age / Gender</span><span className="font-semibold">{selectedPatientDossier.age} Y / {selectedPatientDossier.gender}</span></div>
+                  <div><span className="text-slate-400 block text-[10px]">Blood Group</span><span className="font-bold text-rose-600">{selectedPatientDossier.blood_group}</span></div>
+                  <div><span className="text-slate-400 block text-[10px]">Admitted On</span><span className="font-semibold">{selectedPatientDossier.admission?.admitted_at}</span></div>
+                  <div><span className="text-slate-400 block text-[10px]">Discharged On</span><span className="font-semibold">{selectedPatientDossier.admission?.discharged_at}</span></div>
+                  <div><span className="text-slate-400 block text-[10px]">Admission Type</span><span className="font-semibold">{selectedPatientDossier.admission?.admission_type}</span></div>
+                  <div><span className="text-slate-400 block text-[10px]">Discharge Status</span><span className="font-semibold text-emerald-700">{selectedPatientDossier.admission?.discharge_type}</span></div>
+                  <div className="col-span-2"><span className="text-slate-400 block text-[10px]">Attending Consultant</span><span className="font-semibold">{selectedPatientDossier.admission?.attending_doctor}</span></div>
+                  <div className="col-span-2"><span className="text-slate-400 block text-[10px]">Contact & Address</span><span className="font-semibold">{selectedPatientDossier.phone_number} | {selectedPatientDossier.address}</span></div>
                 </div>
-              ) : (
-                <div className="space-y-2.5">
-                  {selectedPatientDossier.reports?.map((rpt: any) => (
-                    <div key={rpt.report_id} className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
-                      <div className="flex justify-between items-center">
-                        <span className="font-bold text-slate-800 text-sm">{rpt.test_name}</span>
-                        <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">
-                          {rpt.department}
-                        </span>
-                      </div>
+              </div>
 
-                      {rpt.parameters && (
-                        <div className="grid grid-cols-3 gap-2 bg-white p-2 rounded-lg border border-slate-200 text-xs">
-                          {Object.entries(rpt.parameters).map(([k, v]: any) => (
-                            <div key={k}>
-                              <span className="text-slate-400 block text-[10px]">{k}</span>
-                              <span className="font-bold text-slate-800">{v}</span>
-                            </div>
-                          ))}
+              {/* Section 2: Attached Diagnostic Reports */}
+              <div>
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3 flex items-center gap-1.5">
+                  <FlaskConical className="w-4 h-4 text-emerald-600" /> Diagnostic Investigations & Pathology / Scan Findings ({selectedPatientDossier.total_reports})
+                </h4>
+                {selectedPatientDossier.reports?.length === 0 ? (
+                  <p className="text-xs text-slate-400 italic bg-slate-50 p-4 rounded-xl text-center">No diagnostic investigations recorded for this admission encounter.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {selectedPatientDossier.reports?.map((rpt: any) => (
+                      <div key={rpt.report_id} className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 text-xs space-y-2">
+                        <div className="flex justify-between items-center">
+                          <span className="font-bold text-slate-900">{rpt.test_name}</span>
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">{rpt.department}</span>
                         </div>
-                      )}
-
-                      {rpt.notes && <p className="text-xs text-slate-600 italic">"{rpt.notes}"</p>}
-
-                      <div className="text-[10px] text-slate-400 flex justify-between pt-1 border-t border-slate-200/60">
-                        <span>Staff: {rpt.technician}</span>
-                        <span>{new Date(rpt.created_at).toLocaleString()}</span>
+                        {rpt.parameters && (
+                          <div className="grid grid-cols-3 gap-2 bg-white p-2 rounded-lg border border-slate-200">
+                            {Object.entries(rpt.parameters).map(([k, v]: any) => (
+                              <div key={k}><span className="text-slate-400 block text-[10px]">{k}</span><span className="font-bold text-slate-800">{v}</span></div>
+                            ))}
+                          </div>
+                        )}
+                        {rpt.notes && <p className="text-slate-600 italic">"Findings: {rpt.notes}"</p>}
+                        <div className="text-[10px] text-slate-400 flex justify-between pt-1 border-t border-slate-200/60">
+                          <span>Recorded by: {rpt.technician}</span>
+                          <span>{rpt.created_at}</span>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Section 3: Telemetry & Syringe Pump Audit */}
+              <div className="bg-indigo-50/60 p-4 rounded-xl border border-indigo-100">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-indigo-800 mb-2 flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4 text-indigo-600" /> Syringe Pump Infusion & Telemetry Audit
+                </h4>
+                <div className="grid grid-cols-3 gap-3 text-xs mt-2">
+                  <div><span className="text-slate-500 block text-[10px]">Hardware Serial ID</span><span className="font-mono font-bold text-slate-800">{selectedPatientDossier.telemetry_summary?.pump_id}</span></div>
+                  <div><span className="text-slate-500 block text-[10px]">Total Medication Delivered</span><span className="font-bold text-indigo-700 text-sm">{selectedPatientDossier.telemetry_summary?.total_volume_ml.toFixed(1)} mL</span></div>
+                  <div><span className="text-slate-500 block text-[10px]">Mean Line Pressure</span><span className="font-bold text-slate-800 text-sm">{selectedPatientDossier.telemetry_summary?.avg_pressure_kpa} kPa</span></div>
                 </div>
-              )}
+              </div>
+
+              {/* Section 4: Physician Sign-Off */}
+              <div className="pt-4 border-t border-slate-200 flex justify-between items-end text-xs text-slate-500">
+                <div>
+                  <p>Electronically Verified Encounter Record</p>
+                  <p className="text-[10px] text-slate-400 font-mono">Doc-UUID: {selectedPatientDossier.admission?.admission_id}</p>
+                </div>
+                <div className="text-center">
+                  <div className="w-40 border-b border-slate-400 mb-1 pb-4 text-slate-400 italic">Clinical Officer Sign</div>
+                  <span className="font-bold text-slate-700">{selectedPatientDossier.admission?.attending_doctor}</span>
+                </div>
+              </div>
             </div>
 
-            <div className="mt-4 pt-3 border-t border-slate-100 flex justify-between">
+            <div className="mt-6 pt-4 border-t border-slate-200 flex justify-between">
               <button
                 onClick={() => window.print()}
-                className="flex items-center space-x-1.5 px-4 py-2 bg-slate-800 text-white rounded-xl text-xs font-bold hover:bg-slate-900 transition"
+                className="flex items-center space-x-1.5 px-4 py-2 bg-slate-900 text-white rounded-xl text-xs font-bold hover:bg-slate-800 transition shadow"
               >
                 <Printer className="w-4 h-4" />
-                <span>Print Official Dossier</span>
+                <span>Print Official Hospital Dossier</span>
               </button>
               <button
                 onClick={() => setShowDossierModal(false)}
@@ -765,7 +924,7 @@ export default function SmartWardCentral() {
         </div>
       )}
 
-      {/* MODAL: Discharged Patients & Historical Audit Log */}
+      {/* MODAL: Discharged Patients Historical Registry */}
       {showDischargedModal && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-2xl max-w-4xl w-full p-6 shadow-2xl border border-slate-100 max-h-[90vh] flex flex-col">
@@ -807,6 +966,7 @@ export default function SmartWardCentral() {
                         <td className="p-3 text-[11px] text-slate-500">
                           <div>Paired: {rec.paired_at ? new Date(rec.paired_at).toLocaleTimeString() : '--'}</div>
                           <div>Discharged: {rec.discharged_at ? new Date(rec.discharged_at).toLocaleTimeString() : '--'}</div>
+                          <div className="font-semibold text-emerald-700">{rec.discharge_type || 'Routine'}</div>
                         </td>
                         <td className="p-3 font-semibold text-slate-800">
                           {rec.total_volume_ml.toFixed(1)} mL
@@ -906,39 +1066,6 @@ export default function SmartWardCentral() {
                 Close
               </button>
             </div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL: Assign Patient */}
-      {showPairModal && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-100">
-            <div className="flex items-center justify-between pb-4 border-b border-slate-100">
-              <h3 className="text-lg font-bold text-slate-900">Assign Patient & Bind Syringe Pump</h3>
-              <button onClick={() => setShowPairModal(false)} className="text-slate-400 hover:text-slate-600"><X className="w-5 h-5" /></button>
-            </div>
-            <form onSubmit={handlePair} className="mt-4 space-y-4">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">ICU Bed Station</label>
-                <input value={formBed} onChange={(e) => setFormBed(e.target.value)} required className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
-              </div>
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Patient MRN (Auto-Incremented)</label>
-                <input value={formMrn} onChange={(e) => setFormMrn(e.target.value)} required className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
-              </div>
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Patient Full Name</label>
-                <input value={formName} onChange={(e) => setFormName(e.target.value)} required className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
-              </div>
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Syringe Pump Serial Number</label>
-                <input value={formPump} onChange={(e) => setFormPump(e.target.value)} required className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm font-mono focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
-              </div>
-              <button type="submit" className="w-full py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-bold hover:bg-indigo-700 transition mt-2">
-                Confirm & Bind Association
-              </button>
-            </form>
           </div>
         </div>
       )}
