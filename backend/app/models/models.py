@@ -20,10 +20,10 @@ class Bed(Base):
 class Device(Base):
     __tablename__ = "devices"
     device_id = Column(String(64), primary_key=True)
-    device_type = Column(String(30), nullable=False)  # "SYRINGE_PUMP", "PATIENT_MONITOR", "DIALYSIS"
+    device_type = Column(String(30), nullable=False)  # 'PATIENT_MONITOR', 'SYRINGE_PUMP', 'DIALYSIS'
     model_name = Column(String(50), default="Pulse Pro Series")
     firmware_version = Column(String(30), default="v2.1.0")
-    status = Column(String(30), default="ONLINE")
+    status = Column(String(30), default="AVAILABLE")
     last_heartbeat = Column(DateTime(timezone=True))
 
 class Patient(Base):
@@ -42,9 +42,9 @@ class Admission(Base):
     admission_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     patient_id = Column(String(64), ForeignKey("patients.patient_id"))
     bed_id = Column(String(64), ForeignKey("beds.bed_id"))
-    primary_diagnosis = Column(String, default="Clinical Monitoring & Infusion")
+    primary_diagnosis = Column(String, default="Clinical Monitoring & Care")
     admission_type = Column(String(50), default="Emergency")
-    attending_doctor = Column(String(100), default="Duty Medical Officer")
+    attending_doctor = Column(String(100), default="Dr. Robert Vance")
     admitted_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     discharge_type = Column(String(50), nullable=True)
     discharged_at = Column(DateTime(timezone=True), nullable=True)
@@ -77,5 +77,5 @@ class DiagnosticReport(Base):
     test_name = Column(String(100), nullable=False)
     parameters = Column(JSON, nullable=True)
     technician_notes = Column(Text, nullable=True)
-    technician_name = Column(String(100), default="Lab Clinician")
+    technician_name = Column(String(100), default="Diagnostic Staff")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
