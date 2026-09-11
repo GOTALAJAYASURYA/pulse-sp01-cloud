@@ -3,27 +3,24 @@ import json
 import asyncio
 from datetime import datetime, timezone
 import uuid
-from typing import Optional, List
 import redis.asyncio as aioredis
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Optional, List
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.core.database import SessionLocal, engine, Base
 from app.mqtt.worker import start_mqtt_worker
 from app.simulator_runner import start_cloud_simulator
-from app.models.models import (
-    Ward, Bed, Pump, Patient, Admission, 
-    DeviceAssociation, PumpTelemetryLog, DiagnosticReport
-)
+from app.models.models import Ward, Bed, Pump, Patient, Admission, DeviceAssociation, PumpTelemetryLog, DiagnosticReport
 
 # Create tables
 Base.metadata.create_all(bind=engine)
 
 def run_db_migrations():
-    """Auto-migrate columns safely on launch."""
+    """Ensure all required columns exist in PostgreSQL."""
     try:
         with engine.begin() as conn:
             conn.execute(text("""
@@ -38,12 +35,11 @@ def run_db_migrations():
                 ALTER TABLE admissions ADD COLUMN IF NOT EXISTS discharge_type VARCHAR(50);
                 ALTER TABLE admissions ADD COLUMN IF NOT EXISTS discharged_at TIMESTAMP WITH TIME ZONE;
 
-                ALTER TABLE device_associations ADD COLUMN IF NOT EXISTS device_id VARCHAR(64);
                 ALTER TABLE device_associations ADD COLUMN IF NOT EXISTS device_type VARCHAR(30) DEFAULT 'SYRINGE_PUMP';
             """))
-            print("[✓] Database schema migration executed successfully.")
-    except Exception as err:
-        print(f"[!] Migration warning: {err}")
+            print("[✓] Multi-device schema migrations executed successfully.")
+    except Exception as e:
+        print(f"[!] Migration notice: {e}")
 
 app = FastAPI(title="Pulse Multi-Device Enterprise HIS & Telemetry Suite")
 
@@ -65,14 +61,8 @@ def get_db():
 @app.on_event("startup")
 def startup_event():
     run_db_migrations()
-    try:
-        start_mqtt_worker()
-    except Exception as e:
-        print(f"[!] Worker startup error: {e}")
-    try:
-        start_cloud_simulator()
-    except Exception as e:
-        print(f"[!] Simulator startup error: {e}")
+    start_mqtt_worker()
+    start_cloud_simulator()
 
 # --- Pydantic Schemas ---
 class AdmitPatientRequest(BaseModel):
@@ -86,14 +76,14 @@ class AdmitPatientRequest(BaseModel):
     address: Optional[str] = ""
     admission_type: Optional[str] = "Emergency"
     attending_doctor: Optional[str] = "Dr. Robert Vance"
-    primary_diagnosis: Optional[str] = "Acute Clinical Stabilization"
+    primary_diagnosis: Optional[str] = "Acute Hemodynamic Monitoring"
 
 class AttachDeviceRequest(BaseModel):
     bed_number: str
-    patient_mrn: Optional[str] = None
+    patient_mrn: str
     admission_id: Optional[str] = None
     device_id: str
-    device_type: str = "SYRINGE_PUMP"
+    device_type: str  # 'PATIENT_MONITOR', 'SYRINGE_PUMP', 'DIALYSIS'
 
 class UnbindDeviceRequest(BaseModel):
     device_id: str
@@ -116,12 +106,13 @@ class ReportAttachRequest(BaseModel):
 
 @app.get("/")
 def health_check():
-    return {"status": "online", "service": "Pulse Multi-Device Telemetry API"}
+    return {"status": "online", "system": "Pulse Multi-Device Central Telemetry Station"}
 
 @app.get("/api/v1/registry-status")
 def get_registry_status(db: Session = Depends(get_db)):
-    """Fetch bed hierarchy with all attached multi-device telemetry bays."""
+    """Fetch all active bed encounters and their dynamically attached devices."""
     try:
+        # Fetch all occupied/active admissions
         active_admissions = (
             db.query(Admission)
             .filter(Admission.status == "ADMITTED")
@@ -129,16 +120,17 @@ def get_registry_status(db: Session = Depends(get_db)):
             .all()
         )
 
-        occupied_bed_ids = set()
-        beds_list = []
+        bed_list = []
+        busy_beds = set()
 
         for adm in active_admissions:
+            busy_beds.add(adm.bed_id)
             patient = db.query(Patient).filter(Patient.patient_id == adm.patient_id).first()
             bed = db.query(Bed).filter(Bed.bed_id == adm.bed_id).first()
-            bed_no = bed.bed_number if bed else (adm.bed_id or "ICU-B1")
-            occupied_bed_ids.add(bed_no)
+            bed_num = bed.bed_number if bed else adm.bed_id
 
-            assocs = (
+            # Query all active devices attached to this admission
+            active_devices = (
                 db.query(DeviceAssociation)
                 .filter(
                     DeviceAssociation.admission_id == adm.admission_id,
@@ -147,44 +139,54 @@ def get_registry_status(db: Session = Depends(get_db)):
                 .all()
             )
 
-            attached_devices = [
-                {
-                    "association_id": str(da.association_id),
-                    "device_id": da.device_id or da.pump_id or "SP01-2026-0001",
-                    "device_type": da.device_type or "SYRINGE_PUMP",
-                    "paired_at": da.paired_at.isoformat() if da.paired_at else None
-                }
-                for da in assocs
-            ]
+            dev_list = []
+            for d in active_devices:
+                # Resolve device type
+                dtype = getattr(d, "device_type", None)
+                if not dtype:
+                    if d.pump_id.startswith("PM-"):
+                        dtype = "PATIENT_MONITOR"
+                    elif d.pump_id.startswith("DL-"):
+                        dtype = "DIALYSIS"
+                    else:
+                        dtype = "SYRINGE_PUMP"
+
+                dev_list.append({
+                    "association_id": str(d.association_id),
+                    "device_id": d.pump_id,
+                    "device_type": dtype,
+                    "paired_at": d.paired_at.isoformat() if d.paired_at else None
+                })
 
             p_name = f"{patient.first_name} {patient.last_name}".strip() if patient else "Patient"
 
-            beds_list.append({
-                "bed_id": adm.bed_id,
-                "bed_number": bed_no,
+            bed_list.append({
+                "bed_id": str(adm.bed_id),
+                "bed_number": bed_num,
                 "admission_id": str(adm.admission_id),
-                "patient_mrn": patient.patient_id if patient else "PTN-000001",
+                "patient_mrn": patient.patient_id if patient else adm.patient_id,
                 "patient_name": p_name,
                 "age": patient.age if patient else 45,
                 "gender": patient.gender if patient else "Male",
                 "blood_group": patient.blood_group if patient else "O+",
-                "admission_type": adm.admission_type or "Emergency",
-                "attending_doctor": adm.attending_doctor or "Duty Consultant",
+                "admission_type": adm.admission_type,
+                "attending_doctor": adm.attending_doctor,
                 "admitted_at": adm.admitted_at.isoformat() if adm.admitted_at else None,
-                "devices": attached_devices
+                "devices": dev_list
             })
 
-        # Generate lowest missing Bed and MRN suggestions
+        # Calculate next suggested bed index
         idx = 1
-        while f"ICU-B{idx}" in occupied_bed_ids:
+        while f"ICU-B{idx}" in busy_beds:
             idx += 1
         next_bed = f"ICU-B{idx}"
 
-        total_pts = db.query(Patient).count()
-        next_mrn = f"PTN-{str(total_pts + 1).zfill(6)}"
+        total_patients = db.query(Patient).count()
+        next_mrn = f"PTN-{str(total_patients + 1).zfill(6)}"
 
         return {
-            "active_associations": beds_list,
+            "active_associations": bed_list,
+            "beds": bed_list,
             "next_suggestions": {
                 "bed": next_bed,
                 "mrn": next_mrn
@@ -192,30 +194,36 @@ def get_registry_status(db: Session = Depends(get_db)):
         }
     except Exception as e:
         print(f"[!] Registry status error: {e}")
-        return {"active_associations": [], "next_suggestions": {"bed": "ICU-B1", "mrn": "PTN-000001"}}
+        return {"active_associations": [], "beds": [], "next_suggestions": {"bed": "ICU-B1", "mrn": "PTN-000001"}}
 
 @app.post("/api/v1/admit-patient")
 def admit_patient(req: AdmitPatientRequest, db: Session = Depends(get_db)):
-    """Admit a patient directly to a bed station with zero device requirement."""
+    """Admit patient to an ICU Bed directly without requiring an upfront device."""
     try:
         now = datetime.now(timezone.utc)
 
-        # 1. Ward & Bed setup
+        # 1. Ensure Ward exists
         ward = db.query(Ward).filter(Ward.ward_id == "icu-ward-a").first()
         if not ward:
             ward = Ward(ward_id="icu-ward-a", name="Main ICU Wing", ward_type="ICU")
             db.add(ward)
             db.flush()
 
+        # 2. Ensure Bed exists & check occupancy
         bed = db.query(Bed).filter((Bed.bed_id == req.bed_number) | (Bed.bed_number == req.bed_number)).first()
         if not bed:
-            bed = Bed(bed_id=req.bed_number, ward_id="icu-ward-a", bed_number=req.bed_number, current_status="OCCUPIED")
+            bed = Bed(
+                bed_id=req.bed_number,
+                ward_id="icu-ward-a",
+                bed_number=req.bed_number,
+                current_status="OCCUPIED"
+            )
             db.add(bed)
             db.flush()
         else:
             bed.current_status = "OCCUPIED"
 
-        # 2. Patient Profile
+        # 3. Create or update Patient record
         name_parts = req.patient_name.strip().split(" ", 1)
         first_name = name_parts[0] if name_parts[0] else "Patient"
         last_name = name_parts[1] if len(name_parts) > 1 else ""
@@ -243,12 +251,12 @@ def admit_patient(req: AdmitPatientRequest, db: Session = Depends(get_db)):
             patient.phone_number = req.phone_number
             patient.address = req.address
 
-        # 3. Create Admission Encounter
+        # 4. Create active Admission Encounter
         admission = Admission(
             admission_id=uuid.uuid4(),
             patient_id=patient.patient_id,
             bed_id=bed.bed_id,
-            primary_diagnosis=req.primary_diagnosis or "Clinical Monitoring",
+            primary_diagnosis=req.primary_diagnosis or "Acute Hemodynamic Monitoring",
             admission_type=req.admission_type or "Emergency",
             attending_doctor=req.attending_doctor or "Dr. Robert Vance",
             admitted_at=now,
@@ -257,52 +265,79 @@ def admit_patient(req: AdmitPatientRequest, db: Session = Depends(get_db)):
         db.add(admission)
         db.commit()
 
-        return {"status": "success", "admission_id": str(admission.admission_id), "bed_number": req.bed_number}
+        return {"status": "success", "bed_number": req.bed_number, "patient_mrn": req.patient_mrn}
     except Exception as e:
         db.rollback()
-        return {"status": "error", "message": str(e)}
+        print(f"[!] Admission error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/devices/attach")
 def attach_device_to_bed(req: AttachDeviceRequest, db: Session = Depends(get_db)):
-    """Bind a specific hardware unit (Pump, Monitor, Dialysis) to an admitted bed encounter."""
+    """Dynamically attach any telemetry device (PM, SP, DL) to an active bed."""
     try:
         now = datetime.now(timezone.utc)
 
-        # Check if device is active elsewhere
+        # Ensure device isn't already active elsewhere
         existing_active = db.query(DeviceAssociation).filter(
-            (DeviceAssociation.device_id == req.device_id) | (DeviceAssociation.pump_id == req.device_id),
+            DeviceAssociation.pump_id == req.device_id,
             DeviceAssociation.unpaired_at.is_(None)
         ).first()
 
         if existing_active:
-            raise HTTPException(status_code=400, detail=f"Device {req.device_id} is already in active use at another bed!")
+            raise HTTPException(
+                status_code=400,
+                detail=f"Hardware {req.device_id} is already in active use at another bed!"
+            )
 
-        # Find active admission
-        admission = None
+        # Locate active admission for this bed
+        adm = None
         if req.admission_id:
             try:
-                admission = db.query(Admission).filter(Admission.admission_id == uuid.UUID(req.admission_id)).first()
+                adm_uuid = uuid.UUID(req.admission_id)
+                adm = db.query(Admission).filter(Admission.admission_id == adm_uuid).first()
             except ValueError:
                 pass
 
-        if not admission:
+        if not adm:
             bed = db.query(Bed).filter((Bed.bed_id == req.bed_number) | (Bed.bed_number == req.bed_number)).first()
-            if bed:
-                admission = db.query(Admission).filter(Admission.bed_id == bed.bed_id, Admission.status == "ADMITTED").first()
+            bed_id = bed.bed_id if bed else req.bed_number
+            adm = db.query(Admission).filter(
+                Admission.bed_id == bed_id,
+                Admission.status == "ADMITTED"
+            ).order_by(Admission.admitted_at.desc()).first()
 
-        if not admission:
-            raise HTTPException(status_code=404, detail=f"No active admitted patient found at Bed {req.bed_number}")
+        if not adm:
+            raise HTTPException(status_code=404, detail=f"No active admitted patient found at bed {req.bed_number}")
+
+        # Ensure device exists in Pump/Device registry
+        pump_rec = db.query(Pump).filter(Pump.pump_id == req.device_id).first()
+        if not pump_rec:
+            model_map = {
+                "PATIENT_MONITOR": "Pulse Multi-Para PM-10",
+                "SYRINGE_PUMP": "Pulse SP-01",
+                "DIALYSIS": "Pulse CRRT-DL5"
+            }
+            pump_rec = Pump(
+                pump_id=req.device_id,
+                model_name=model_map.get(req.device_type, "Pulse Hardware"),
+                firmware_version="v2.1.0",
+                status="ONLINE"
+            )
+            db.add(pump_rec)
+            db.flush()
 
         assoc = DeviceAssociation(
             association_id=uuid.uuid4(),
-            admission_id=admission.admission_id,
-            bed_id=admission.bed_id,
+            admission_id=adm.admission_id,
+            bed_id=adm.bed_id,
             pump_id=req.device_id,
-            device_id=req.device_id,
-            device_type=req.device_type,
             paired_at=now,
-            paired_by_user_id="CLINICAL-NURSE-01"
+            paired_by_user_id="DUTY-NURSE-01"
         )
+        # Store device_type if column exists
+        if hasattr(assoc, "device_type"):
+            setattr(assoc, "device_type", req.device_type)
+
         db.add(assoc)
         db.commit()
 
@@ -312,66 +347,67 @@ def attach_device_to_bed(req: AttachDeviceRequest, db: Session = Depends(get_db)
         raise
     except Exception as e:
         db.rollback()
-        return {"status": "error", "message": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/devices/unbind")
-def unbind_device(req: UnbindDeviceRequest, db: Session = Depends(get_db)):
-    """Release an individual equipment unit back to available inventory."""
+def unbind_single_device(req: UnbindDeviceRequest, db: Session = Depends(get_db)):
+    """Release a single device without discharging the patient."""
     try:
         now = datetime.now(timezone.utc)
         assoc = db.query(DeviceAssociation).filter(
-            (DeviceAssociation.device_id == req.device_id) | (DeviceAssociation.pump_id == req.device_id),
+            DeviceAssociation.pump_id == req.device_id,
             DeviceAssociation.unpaired_at.is_(None)
         ).first()
 
-        if assoc:
-            assoc.unpaired_at = now
-            db.commit()
-            return {"status": "success", "message": f"Device {req.device_id} released successfully."}
-        return {"status": "error", "message": "Active device association not found."}
+        if not assoc:
+            raise HTTPException(status_code=404, detail="No active device association found.")
+
+        assoc.unpaired_at = now
+        db.commit()
+        return {"status": "success", "message": f"Device {req.device_id} released successfully."}
     except Exception as e:
         db.rollback()
-        return {"status": "error", "message": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/discharge-encounter")
 def discharge_encounter(req: DischargeEncounterRequest, db: Session = Depends(get_db)):
-    """Discharge patient and release bed station plus all attached devices."""
+    """Discharge patient encounter and release bed + all attached hardware."""
     try:
         now = datetime.now(timezone.utc)
         bed = db.query(Bed).filter((Bed.bed_id == req.bed_number) | (Bed.bed_number == req.bed_number)).first()
-        if not bed:
-            raise HTTPException(status_code=404, detail="Bed not found")
+        bed_id = bed.bed_id if bed else req.bed_number
 
-        admission = db.query(Admission).filter(Admission.bed_id == bed.bed_id, Admission.status == "ADMITTED").first()
-        if not admission:
-            raise HTTPException(status_code=404, detail="No active encounter to discharge.")
+        adm = db.query(Admission).filter(
+            Admission.bed_id == bed_id,
+            Admission.status == "ADMITTED"
+        ).order_by(Admission.admitted_at.desc()).first()
 
-        admission.status = "DISCHARGED"
-        admission.discharged_at = now
-        admission.discharge_type = req.discharge_type or "Routine / Recovered"
+        if adm:
+            adm.status = "DISCHARGED"
+            adm.discharged_at = now
+            adm.discharge_type = req.discharge_type
 
-        # Release all attached hardware
-        active_devices = db.query(DeviceAssociation).filter(
-            DeviceAssociation.admission_id == admission.admission_id,
-            DeviceAssociation.unpaired_at.is_(None)
-        ).all()
+            # Unbind all currently attached devices
+            active_devices = db.query(DeviceAssociation).filter(
+                DeviceAssociation.admission_id == adm.admission_id,
+                DeviceAssociation.unpaired_at.is_(None)
+            ).all()
 
-        for dev in active_devices:
-            dev.unpaired_at = now
+            for d in active_devices:
+                d.unpaired_at = now
 
-        bed.current_status = "AVAILABLE"
+        if bed:
+            bed.current_status = "AVAILABLE"
+
         db.commit()
-
-        return {"status": "success", "message": f"Patient discharged and Bed {req.bed_number} released."}
-    except HTTPException:
-        db.rollback()
-        raise
+        return {"status": "success", "message": f"Bed {req.bed_number} discharged and all hardware released."}
     except Exception as e:
         db.rollback()
-        return {"status": "error", "message": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/reports/attach")
 def attach_diagnostic_report(req: ReportAttachRequest, db: Session = Depends(get_db)):
+    """Attach blood/lab/scan diagnostics directly to patient encounter."""
     try:
         patient = db.query(Patient).filter(Patient.patient_id == req.patient_mrn).first()
         if not patient:
@@ -404,6 +440,7 @@ def attach_diagnostic_report(req: ReportAttachRequest, db: Session = Depends(get
 
 @app.get("/api/v1/patient-dossier/{patient_id}")
 def get_patient_dossier(patient_id: str, db: Session = Depends(get_db)):
+    """Fetch unified dossier with demographics, admission info, diagnostic reports, and telemetry audit."""
     try:
         patient = db.query(Patient).filter(Patient.patient_id == patient_id).first()
         if not patient:
@@ -425,16 +462,17 @@ def get_patient_dossier(patient_id: str, db: Session = Depends(get_db)):
                 .first()
             )
             if assoc:
-                telemetry_stats["pump_id"] = assoc.device_id or assoc.pump_id or "--"
+                telemetry_stats["pump_id"] = assoc.pump_id
                 t_sum = db.execute(
                     text("""
                         SELECT 
                             COALESCE(MAX(volume_infused_ml), 0) as total_vol,
                             COALESCE(AVG(pressure_kpa), 0) as avg_p
                         FROM pump_telemetry_logs
-                        WHERE pump_id = :pid AND recorded_at >= :p_start
+                        WHERE pump_id = :pid
+                          AND recorded_at >= :p_start
                     """),
-                    {"pid": assoc.pump_id or assoc.device_id, "p_start": assoc.paired_at}
+                    {"pid": assoc.pump_id, "p_start": assoc.paired_at}
                 ).fetchone()
                 if t_sum:
                     telemetry_stats["total_volume_ml"] = float(t_sum[0])
@@ -473,7 +511,7 @@ def get_patient_dossier(patient_id: str, db: Session = Depends(get_db)):
                 "bed_id": admission.bed_id if admission else "--",
                 "diagnosis": admission.primary_diagnosis if admission else "--",
                 "admission_type": admission.admission_type if admission else "Emergency",
-                "attending_doctor": admission.attending_doctor if admission else "Duty Physician",
+                "attending_doctor": admission.attending_doctor if admission else "Dr. Robert Vance",
                 "admitted_at": admission.admitted_at.strftime("%b %d, %Y - %I:%M %p") if admission and admission.admitted_at else "--",
                 "discharged_at": admission.discharged_at.strftime("%b %d, %Y - %I:%M %p") if admission and admission.discharged_at else "Currently Inpatient",
                 "discharge_type": admission.discharge_type if admission and admission.discharge_type else "In Care / Active"
@@ -487,6 +525,7 @@ def get_patient_dossier(patient_id: str, db: Session = Depends(get_db)):
 
 @app.get("/api/v1/discharged-records")
 def get_discharged_records(db: Session = Depends(get_db)):
+    """Fetch complete historical audit logs for all discharged patient encounters."""
     try:
         admissions = (
             db.query(Admission)
@@ -495,23 +534,24 @@ def get_discharged_records(db: Session = Depends(get_db)):
             .all()
         )
 
-        records = []
+        audit_data = []
         for adm in admissions:
             patient = db.query(Patient).filter(Patient.patient_id == adm.patient_id).first()
             bed = db.query(Bed).filter(Bed.bed_id == adm.bed_id).first()
 
-            records.append({
+            audit_data.append({
                 "association_id": str(adm.admission_id),
-                "patient_id": patient.patient_id if patient else "PTN-UNKNOWN",
+                "patient_id": patient.patient_id if patient else adm.patient_id,
                 "patient_name": f"{patient.first_name} {patient.last_name}".strip() if patient else "Patient",
-                "bed_number": bed.bed_number if bed else (adm.bed_id or "--"),
+                "bed_number": bed.bed_number if bed else adm.bed_id,
                 "paired_at": adm.admitted_at.isoformat() if adm.admitted_at else None,
                 "discharged_at": adm.discharged_at.isoformat() if adm.discharged_at else None,
                 "discharge_type": adm.discharge_type or "Routine",
             })
-        return records
+
+        return audit_data
     except Exception as e:
-        print(f"[!] Discharge records error: {e}")
+        print(f"[!] Error loading discharge history: {e}")
         return []
 
 # --- WebSockets ---
@@ -521,6 +561,7 @@ connected_websockets = set()
 async def websocket_telemetry_endpoint(websocket: WebSocket):
     await websocket.accept()
     connected_websockets.add(websocket)
+
     redis_url = os.getenv("REDIS_URL") or os.getenv("REDIS_HOST")
 
     if redis_url and redis_url != "localhost":
