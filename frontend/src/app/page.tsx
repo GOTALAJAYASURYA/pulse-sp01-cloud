@@ -19,7 +19,6 @@ interface AttachedDevice {
   association_id: string;
   device_id: string;
   device_type: DeviceType;
-  model_name?: string;
   paired_at: string;
 }
 
@@ -36,20 +35,6 @@ interface ActiveBed {
   attending_doctor?: string;
   admitted_at?: string;
   devices: AttachedDevice[];
-}
-
-interface DischargedRecord {
-  association_id: string;
-  patient_id: string;
-  patient_name: string;
-  bed_number: string;
-  device_id?: string;
-  device_type?: string;
-  paired_at: string;
-  discharged_at: string;
-  discharge_type?: string;
-  total_volume_ml?: number;
-  avg_pressure_kpa?: number;
 }
 
 interface DeviceTelemetryPayload {
@@ -72,9 +57,7 @@ interface DeviceTelemetryPayload {
     time_remaining_sec: number;
     pressure_kpa: number;
   };
-  ders?: {
-    drug_name: string;
-  };
+  ders?: { drug_name: string };
   dialysis_metrics?: {
     blood_flow_ml_min: number;
     uf_rate_ml_hr: number;
@@ -88,7 +71,14 @@ export default function SmartWardCentral() {
   const [beds, setBeds] = useState<ActiveBed[]>([]);
   const [telemetry, setTelemetry] = useState<Record<string, DeviceTelemetryPayload>>({});
   const [connected, setConnected] = useState(false);
-  const [audioEnabled, setAudioEnabled] = useState(false);
+  const [audioEnabled, setAudioEnabled] = useState(true);
+
+  // Suggestions from Fleet
+  const [suggestedBed, setSuggestedBed] = useState('ICU-B1');
+  const [suggestedMrn, setSuggestedMrn] = useState('PTN-000001');
+  const [fleetSp, setFleetSp] = useState('SP01-2026-0001');
+  const [fleetPm, setFleetPm] = useState('PM01-2026-1001');
+  const [fleetDl, setFleetDl] = useState('DL01-2026-5001');
 
   // Modals
   const [showAdmissionModal, setShowAdmissionModal] = useState(false);
@@ -96,7 +86,7 @@ export default function SmartWardCentral() {
   const [showBedQrStudio, setShowBedQrStudio] = useState(false);
   const [targetBedForDevice, setTargetBedForDevice] = useState<ActiveBed | null>(null);
   const [showDischargedModal, setShowDischargedModal] = useState(false);
-  const [dischargedRecords, setDischargedRecords] = useState<DischargedRecord[]>([]);
+  const [dischargedRecords, setDischargedRecords] = useState<any[]>([]);
   const [showLabModal, setShowLabModal] = useState(false);
   const [showDossierModal, setShowDossierModal] = useState(false);
   const [selectedPatientDossier, setSelectedPatientDossier] = useState<any>(null);
@@ -115,15 +105,14 @@ export default function SmartWardCentral() {
   const [formDoctor, setFormDoctor] = useState('Dr. Robert Vance');
   const [formDiagnosis, setFormDiagnosis] = useState('Acute Hemodynamic Monitoring');
 
-  // Attach Device Modal Form & State
+  // Attach Device
   const [attachTab, setAttachTab] = useState<'AUTO' | 'CAMERA'>('AUTO');
   const [selectedDeviceType, setSelectedDeviceType] = useState<DeviceType>('SYRINGE_PUMP');
   const [deviceSerialId, setDeviceSerialId] = useState('SP01-2026-0001');
   const [deviceCameraActive, setDeviceCameraActive] = useState(false);
-  const [deviceScanStatus, setDeviceScanStatus] = useState('Position Hardware QR sticker in camera...');
   const deviceQrScannerRef = useRef<Html5Qrcode | null>(null);
 
-  // Lab Report Modal States
+  // Lab Report
   const [labMrn, setLabMrn] = useState('');
   const [labDept, setLabDept] = useState('PATHOLOGY');
   const [labTestName, setLabTestName] = useState('Complete Blood Count (CBC)');
@@ -133,12 +122,34 @@ export default function SmartWardCentral() {
   const [labNotes, setLabNotes] = useState('');
   const [labLoading, setLabLoading] = useState(false);
   const [labCameraActive, setLabCameraActive] = useState(false);
-  const [labScanStatus, setLabScanStatus] = useState('Position patient QR in camera...');
   const labQrScannerRef = useRef<Html5Qrcode | null>(null);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
 
-  // Fetch Ward Registry
+  // Realistic Hospital Alarm Chime (IEC 60601-1-8 standard tone)
+  const playHospitalAlarmSound = () => {
+    if (!audioEnabled) return;
+    try {
+      const ctx = audioCtxRef.current || new (window.AudioContext || (window as any).webkitAudioContext)();
+      audioCtxRef.current = ctx;
+      if (ctx.state === 'suspended') ctx.resume();
+
+      const tones = [523.25, 659.25, 783.99]; // C5 - E5 - G5 medical alert sequence
+      tones.forEach((freq, idx) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, ctx.currentTime + idx * 0.12);
+        gain.gain.setValueAtTime(0.2, ctx.currentTime + idx * 0.12);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + idx * 0.12 + 0.1);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(ctx.currentTime + idx * 0.12);
+        osc.stop(ctx.currentTime + idx * 0.12 + 0.1);
+      });
+    } catch (e) {}
+  };
+
   const fetchRegistry = async () => {
     try {
       const res = await fetch(`${API_BASE}/api/v1/registry-status`);
@@ -146,8 +157,13 @@ export default function SmartWardCentral() {
         const data = await res.json();
         setBeds(data.active_associations || data.beds || []);
         if (data.next_suggestions) {
-          setFormBed(data.next_suggestions.bed || 'ICU-B1');
-          setFormMrn(data.next_suggestions.mrn || 'PTN-000001');
+          setSuggestedBed(data.next_suggestions.bed);
+          setSuggestedMrn(data.next_suggestions.mrn);
+          setFormBed(data.next_suggestions.bed);
+          setFormMrn(data.next_suggestions.mrn);
+          setFleetSp(data.next_suggestions.sp);
+          setFleetPm(data.next_suggestions.pm);
+          setFleetDl(data.next_suggestions.dl);
         }
       }
     } catch (e) {
@@ -155,55 +171,18 @@ export default function SmartWardCentral() {
     }
   };
 
-  const fetchDischargedRecords = async () => {
-    try {
-      const res = await fetch(`${API_BASE}/api/v1/discharged-records`);
-      if (res.ok) {
-        const data = await res.json();
-        setDischargedRecords(data);
-        setShowDischargedModal(true);
-      }
-    } catch (e) {
-      alert('Failed to load historical discharge records.');
-    }
-  };
-
   useEffect(() => {
     fetchRegistry();
   }, []);
 
-  // Update default serial ID suggestion when device type changes in Auto-Tab
+  // Update selected hardware suggestion on device type switch
   useEffect(() => {
-    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
-    if (selectedDeviceType === 'PATIENT_MONITOR') {
-      setDeviceSerialId(`PM-2026-${randomSuffix}`);
-    } else if (selectedDeviceType === 'SYRINGE_PUMP') {
-      setDeviceSerialId(`SP01-2026-${randomSuffix}`);
-    } else if (selectedDeviceType === 'DIALYSIS') {
-      setDeviceSerialId(`DL-2026-${randomSuffix}`);
-    }
-  }, [selectedDeviceType]);
+    if (selectedDeviceType === 'SYRINGE_PUMP') setDeviceSerialId(fleetSp);
+    else if (selectedDeviceType === 'PATIENT_MONITOR') setDeviceSerialId(fleetPm);
+    else if (selectedDeviceType === 'DIALYSIS') setDeviceSerialId(fleetDl);
+  }, [selectedDeviceType, fleetSp, fleetPm, fleetDl]);
 
-  // Audio Alarm Engine
-  const playAlarmTone = () => {
-    if (!audioEnabled) return;
-    try {
-      const ctx = audioCtxRef.current || new (window.AudioContext || (window as any).webkitAudioContext)();
-      audioCtxRef.current = ctx;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.type = 'triangle';
-      osc.frequency.setValueAtTime(960, ctx.currentTime);
-      gain.gain.setValueAtTime(0.3, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.25);
-    } catch (e) {}
-  };
-
-  // WebSocket Ingestion
+  // WebSocket Live Updates
   useEffect(() => {
     const ws = new WebSocket(WS_BASE);
     ws.onopen = () => setConnected(true);
@@ -213,7 +192,7 @@ export default function SmartWardCentral() {
         const data: DeviceTelemetryPayload = JSON.parse(event.data);
         setTelemetry((prev) => ({ ...prev, [data.device_id]: data }));
         if (data.active_alarms && data.active_alarms.length > 0) {
-          playAlarmTone();
+          playHospitalAlarmSound();
         }
       } catch (err) {}
     };
@@ -253,7 +232,7 @@ export default function SmartWardCentral() {
     }
   };
 
-  // Attach Device
+  // Device Binding
   const handleAttachDeviceSubmit = async (deviceIdToBind?: string, deviceTypeToBind?: DeviceType) => {
     if (!targetBedForDevice) return;
     const finalDeviceId = (deviceIdToBind || deviceSerialId).trim();
@@ -273,9 +252,7 @@ export default function SmartWardCentral() {
       });
       const data = await res.json();
       if (res.ok && data.status === 'success') {
-        if (deviceQrScannerRef.current?.isScanning) {
-          await deviceQrScannerRef.current.stop();
-        }
+        if (deviceQrScannerRef.current?.isScanning) await deviceQrScannerRef.current.stop();
         setDeviceCameraActive(false);
         setShowAttachDeviceModal(false);
         await fetchRegistry();
@@ -289,18 +266,14 @@ export default function SmartWardCentral() {
 
   // Unbind Single Device
   const handleUnbindDevice = async (deviceId: string, bedNumber: string) => {
-    if (!confirm(`Unbind and release equipment ${deviceId} from Bed ${bedNumber}? Patient will remain admitted.`)) return;
+    if (!confirm(`Release equipment ${deviceId} from Bed ${bedNumber}? Equipment will return to available inventory.`)) return;
     try {
       const res = await fetch(`${API_BASE}/api/v1/devices/unbind`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ device_id: deviceId })
       });
-      if (res.ok) {
-        await fetchRegistry();
-      } else {
-        alert('Failed to release device.');
-      }
+      if (res.ok) await fetchRegistry();
     } catch (err) {
       alert('Network error releasing device.');
     }
@@ -309,7 +282,7 @@ export default function SmartWardCentral() {
   // Discharge Patient
   const handleDischargePatient = async (bed: ActiveBed) => {
     const dischargeReason = prompt(
-      `Discharge patient ${bed.patient_name} (${bed.patient_mrn})?\nEnter discharge type:\n1. Routine / Recovered\n2. Referred / Transferred\n3. Discharged on Request (DOR)\n4. LAMA`, 
+      `Discharge patient ${bed.patient_name} (${bed.patient_mrn})?\nEnter outcome: 1. Routine / Recovered 2. Transferred 3. DOR`, 
       "Routine / Recovered"
     );
     if (!dischargeReason) return;
@@ -318,11 +291,7 @@ export default function SmartWardCentral() {
       await fetch(`${API_BASE}/api/v1/discharge-encounter`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          bed_number: bed.bed_number, 
-          patient_mrn: bed.patient_mrn,
-          discharge_type: dischargeReason 
-        })
+        body: JSON.stringify({ bed_number: bed.bed_number, patient_mrn: bed.patient_mrn, discharge_type: dischargeReason })
       });
       await fetchRegistry();
     } catch (err) {
@@ -330,159 +299,9 @@ export default function SmartWardCentral() {
     }
   };
 
-  // Camera QR Decoder for Hardware Chassis Stickers
-  const decodeDeviceQrText = (decodedText: string) => {
-    let devId = decodedText.trim();
-    let devType: DeviceType = 'SYRINGE_PUMP';
-
-    if (decodedText.startsWith('MONITOR:') || decodedText.includes('TYPE:PM')) {
-      devType = 'PATIENT_MONITOR';
-      devId = decodedText.replace('MONITOR:', '').split('|')[0];
-    } else if (decodedText.startsWith('DIALYSIS:') || decodedText.includes('TYPE:DL')) {
-      devType = 'DIALYSIS';
-      devId = decodedText.replace('DIALYSIS:', '').split('|')[0];
-    } else if (decodedText.startsWith('PUMP:') || decodedText.includes('TYPE:SP')) {
-      devType = 'SYRINGE_PUMP';
-      devId = decodedText.replace('PUMP:', '').split('|')[0];
-    } else if (devId.startsWith('PM-')) {
-      devType = 'PATIENT_MONITOR';
-    } else if (devId.startsWith('DL-')) {
-      devType = 'DIALYSIS';
-    }
-
-    setDeviceSerialId(devId);
-    setSelectedDeviceType(devType);
-    handleAttachDeviceSubmit(devId, devType);
-  };
-
-  // Device Camera Lifecycle
-  useEffect(() => {
-    if (!deviceCameraActive) return;
-    setDeviceScanStatus('Requesting camera for hardware pairing...');
-    const elementId = 'device-qr-reader';
-
-    const timer = setTimeout(async () => {
-      try {
-        const scanner = new Html5Qrcode(elementId);
-        deviceQrScannerRef.current = scanner;
-        await scanner.start(
-          { facingMode: 'environment' },
-          { fps: 15, qrbox: { width: 220, height: 220 } },
-          async (decodedText) => {
-            decodeDeviceQrText(decodedText);
-          },
-          () => {}
-        );
-        setDeviceScanStatus('Camera Active: Point at device chassis QR');
-      } catch (err) {
-        setDeviceScanStatus('Camera unavailable or permission denied.');
-      }
-    }, 200);
-
-    return () => {
-      clearTimeout(timer);
-      if (deviceQrScannerRef.current && deviceQrScannerRef.current.isScanning) {
-        deviceQrScannerRef.current.stop().catch(() => {});
-      }
-    };
-  }, [deviceCameraActive]);
-
-  // Lab Report Camera Scanner Lifecycle
-  useEffect(() => {
-    if (!labCameraActive) return;
-    setLabScanStatus('Starting patient wristband scanner...');
-    const elementId = 'lab-qr-reader';
-
-    const timer = setTimeout(async () => {
-      try {
-        const scanner = new Html5Qrcode(elementId);
-        labQrScannerRef.current = scanner;
-        await scanner.start(
-          { facingMode: 'environment' },
-          { fps: 15, qrbox: { width: 220, height: 220 } },
-          async (decodedText) => {
-            let foundMrn = decodedText.trim();
-            if (decodedText.includes('|')) {
-              decodedText.split('|').forEach(p => {
-                const [k, v] = p.split(':');
-                if (k === 'MRN') foundMrn = v;
-              });
-            } else if (decodedText.startsWith('MRN:')) {
-              foundMrn = decodedText.replace('MRN:', '');
-            }
-            setLabMrn(foundMrn);
-            if (labQrScannerRef.current?.isScanning) await labQrScannerRef.current.stop();
-            setLabCameraActive(false);
-          },
-          () => {}
-        );
-        setLabScanStatus('Scanning... Point at patient wristband');
-      } catch (err) {
-        setLabScanStatus('Camera access error.');
-      }
-    }, 200);
-
-    return () => {
-      clearTimeout(timer);
-      if (labQrScannerRef.current && labQrScannerRef.current.isScanning) {
-        labQrScannerRef.current.stop().catch(() => {});
-      }
-    };
-  }, [labCameraActive]);
-
-  // Attach Diagnostic Lab Report
-  const handleAttachReport = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLabLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/api/v1/reports/attach`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          patient_mrn: labMrn.trim(),
-          department: labDept,
-          test_name: labTestName,
-          parameters: labDept === 'PATHOLOGY' 
-            ? { 'Hemoglobin (g/dL)': labHb, 'WBC (/mcL)': labWbc, 'Platelets (/mcL)': labPlatelets }
-            : { 'Modality': labTestName, 'Findings': labNotes },
-          technician_notes: labNotes,
-          technician_name: 'Central Diagnostic Wing'
-        })
-      });
-      const data = await res.json();
-      if (res.ok && data.status === 'success') {
-        alert('Diagnostic investigation attached successfully.');
-        setShowLabModal(false);
-        setLabNotes('');
-      } else {
-        alert(data.detail || data.message || 'Failed to attach investigation.');
-      }
-    } catch (err: any) {
-      alert(`Network error: ${err.message}`);
-    } finally {
-      setLabLoading(false);
-    }
-  };
-
-  // Open Full Patient Dossier
-  const openDossier = async (mrn: string) => {
-    try {
-      const res = await fetch(`${API_BASE}/api/v1/patient-dossier/${mrn}`);
-      if (res.ok) {
-        const data = await res.json();
-        setSelectedPatientDossier(data);
-        setShowDossierModal(true);
-      } else {
-        alert('Could not retrieve patient dossier.');
-      }
-    } catch (err) {
-      alert('Error fetching patient clinical dossier.');
-    }
-  };
-
   return (
     <main className="min-h-screen bg-slate-900 text-slate-100 p-6 font-sans">
-      {/* Top Clinical Header */}
+      {/* Header */}
       <header className="mb-6 flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-slate-800/80 backdrop-blur-md p-6 rounded-2xl border border-slate-700 shadow-lg">
         <div>
           <div className="flex items-center space-x-3">
@@ -495,7 +314,7 @@ export default function SmartWardCentral() {
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Enterprise Fleet: {beds.length} Active Bed Encounters | Real-time Multimodal Fleet Station
+            ICU Fleet: {beds.length} Active Bed Encounters | Real-time Multi-Hardware Monitoring Station
           </p>
         </div>
 
@@ -503,7 +322,6 @@ export default function SmartWardCentral() {
           <button
             onClick={() => {
               setLabMrn(beds[0]?.patient_mrn || '');
-              setLabCameraActive(false);
               setShowLabModal(true);
             }}
             className="flex items-center space-x-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-emerald-600 text-white hover:bg-emerald-500 transition shadow"
@@ -513,7 +331,13 @@ export default function SmartWardCentral() {
           </button>
 
           <button
-            onClick={fetchDischargedRecords}
+            onClick={async () => {
+              const res = await fetch(`${API_BASE}/api/v1/discharged-records`);
+              if (res.ok) {
+                setDischargedRecords(await res.json());
+                setShowDischargedModal(true);
+              }
+            }}
             className="flex items-center space-x-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-amber-600 text-white hover:bg-amber-500 transition shadow"
           >
             <FolderClock className="w-4 h-4" />
@@ -529,7 +353,11 @@ export default function SmartWardCentral() {
           </button>
 
           <button
-            onClick={() => setShowAdmissionModal(true)}
+            onClick={() => {
+              setFormBed(suggestedBed);
+              setFormMrn(suggestedMrn);
+              setShowAdmissionModal(true);
+            }}
             className="flex items-center space-x-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-500 transition shadow"
           >
             <UserPlus className="w-4 h-4" />
@@ -555,7 +383,7 @@ export default function SmartWardCentral() {
         </div>
       </header>
 
-      {/* Multi-Device Bed Stations Grid */}
+      {/* Bed Stations Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
         {beds.map((b) => {
           const hasDevices = b.devices && b.devices.length > 0;
@@ -577,7 +405,13 @@ export default function SmartWardCentral() {
                   <div className="flex items-center space-x-1.5">
                     {b.patient_mrn && (
                       <button
-                        onClick={() => openDossier(b.patient_mrn!)}
+                        onClick={async () => {
+                          const res = await fetch(`${API_BASE}/api/v1/patient-dossier/${b.patient_mrn}`);
+                          if (res.ok) {
+                            setSelectedPatientDossier(await res.json());
+                            setShowDossierModal(true);
+                          }
+                        }}
                         title="View Full Dossier"
                         className="p-1.5 text-slate-400 hover:text-indigo-300 rounded-lg hover:bg-slate-700 transition"
                       >
@@ -612,8 +446,8 @@ export default function SmartWardCentral() {
                     <button
                       onClick={() => {
                         setTargetBedForDevice(b);
-                        setAttachTab('AUTO');
-                        setDeviceCameraActive(false);
+                        setSelectedDeviceType('SYRINGE_PUMP');
+                        setDeviceSerialId(fleetSp);
                         setShowAttachDeviceModal(true);
                       }}
                       className="text-xs font-bold text-indigo-300 bg-indigo-950/80 hover:bg-indigo-900 border border-indigo-700 px-2.5 py-1 rounded-xl transition flex items-center gap-1 shadow-sm"
@@ -644,7 +478,7 @@ export default function SmartWardCentral() {
                         const temp = live?.vitals?.temp_c ?? 36.8;
 
                         return (
-                          <div key={dev.device_id} className={`p-3 rounded-xl border transition ${hasAlarm ? 'bg-red-950/40 border-red-500' : 'bg-slate-900/80 border-emerald-900/60'}`}>
+                          <div key={dev.device_id} className={`p-3 rounded-xl border transition ${hasAlarm ? 'bg-red-950/70 border-red-500 shadow-[0_0_12px_#ef4444]' : 'bg-slate-900/80 border-emerald-900/60'}`}>
                             <div className="flex justify-between items-center pb-2 border-b border-slate-800">
                               <div className="flex items-center gap-1.5 text-xs font-bold text-emerald-400">
                                 <HeartPulse className="w-3.5 h-3.5 animate-pulse" />
@@ -677,6 +511,11 @@ export default function SmartWardCentral() {
                                 <span className="text-xs font-black text-slate-300 mt-1 block">{resp} | {temp}°</span>
                               </div>
                             </div>
+                            {hasAlarm && (
+                              <div className="mt-2 text-[11px] font-bold text-red-400 flex items-center gap-1 animate-pulse">
+                                <AlertTriangle className="w-3.5 h-3.5" /> {live?.active_alarms?.join(', ')}
+                              </div>
+                            )}
                           </div>
                         );
                       }
@@ -691,7 +530,7 @@ export default function SmartWardCentral() {
                         const pct = Math.min(100, Math.round((delivered / (vtbi || 50)) * 100));
 
                         return (
-                          <div key={dev.device_id} className={`p-3 rounded-xl border transition ${hasAlarm ? 'bg-red-950/40 border-red-500' : 'bg-slate-900/80 border-indigo-900/60'}`}>
+                          <div key={dev.device_id} className={`p-3 rounded-xl border transition ${hasAlarm ? 'bg-red-950/70 border-red-500 shadow-[0_0_12px_#ef4444]' : 'bg-slate-900/80 border-indigo-900/60'}`}>
                             <div className="flex justify-between items-center pb-2 border-b border-slate-800">
                               <div className="flex items-center gap-1.5 text-xs font-bold text-indigo-400">
                                 <Activity className="w-3.5 h-3.5" />
@@ -719,6 +558,11 @@ export default function SmartWardCentral() {
                             <div className="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden mt-2">
                               <div className="h-full bg-indigo-500 transition-all duration-300" style={{ width: `${pct}%` }} />
                             </div>
+                            {hasAlarm && (
+                              <div className="mt-2 text-[11px] font-bold text-red-400 flex items-center gap-1 animate-pulse">
+                                <AlertTriangle className="w-3.5 h-3.5" /> {live?.active_alarms?.join(', ')}
+                              </div>
+                            )}
                           </div>
                         );
                       }
@@ -728,9 +572,10 @@ export default function SmartWardCentral() {
                         const bfr = live?.dialysis_metrics?.blood_flow_ml_min ?? 250;
                         const ufr = live?.dialysis_metrics?.uf_rate_ml_hr ?? 300;
                         const totalUf = live?.dialysis_metrics?.total_uf_removed_ml ?? 1200;
+                        const vp = live?.dialysis_metrics?.venous_pressure_mmhg ?? 110;
 
                         return (
-                          <div key={dev.device_id} className={`p-3 rounded-xl border transition ${hasAlarm ? 'bg-red-950/40 border-red-500' : 'bg-slate-900/80 border-rose-900/60'}`}>
+                          <div key={dev.device_id} className={`p-3 rounded-xl border transition ${hasAlarm ? 'bg-red-950/70 border-red-500 shadow-[0_0_12px_#ef4444]' : 'bg-slate-900/80 border-rose-900/60'}`}>
                             <div className="flex justify-between items-center pb-2 border-b border-slate-800">
                               <div className="flex items-center gap-1.5 text-xs font-bold text-rose-400">
                                 <Droplets className="w-3.5 h-3.5 animate-bounce" />
@@ -755,10 +600,15 @@ export default function SmartWardCentral() {
                                 <span className="text-xs font-black text-amber-300">{ufr} mL/h</span>
                               </div>
                               <div className="bg-slate-950/60 p-1.5 rounded-lg border border-slate-800">
-                                <span className="text-[9px] text-slate-400 block uppercase">Total Removed</span>
-                                <span className="text-xs font-black text-emerald-400">{totalUf} mL</span>
+                                <span className="text-[9px] text-slate-400 block uppercase">Venous P</span>
+                                <span className="text-xs font-black text-emerald-400">{vp} mmHg</span>
                               </div>
                             </div>
+                            {hasAlarm && (
+                              <div className="mt-2 text-[11px] font-bold text-red-400 flex items-center gap-1 animate-pulse">
+                                <AlertTriangle className="w-3.5 h-3.5" /> {live?.active_alarms?.join(', ')}
+                              </div>
+                            )}
                           </div>
                         );
                       }
@@ -769,7 +619,7 @@ export default function SmartWardCentral() {
                 </div>
               </div>
 
-              {/* Bed Card Footer */}
+              {/* Card Footer */}
               <div className="mt-5 pt-3 border-t border-slate-700/60 flex items-center justify-between">
                 <span className="text-[11px] text-slate-400 font-mono">
                   {b.admitted_at ? `Admitted: ${new Date(b.admitted_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Bed Ready'}
@@ -796,7 +646,7 @@ export default function SmartWardCentral() {
             <div className="flex items-center justify-between pb-4 border-b border-slate-700">
               <div>
                 <h3 className="text-lg font-bold text-white">Patient Clinical Admission</h3>
-                <p className="text-xs text-slate-400">Admit patient to an ICU Bed Station. (Equipment attached separately).</p>
+                <p className="text-xs text-slate-400">Assign inpatient to bed station (Duplication protected).</p>
               </div>
               <button onClick={() => setShowAdmissionModal(false)} className="text-slate-400 hover:text-white"><X className="w-5 h-5" /></button>
             </div>
@@ -808,7 +658,7 @@ export default function SmartWardCentral() {
                   <input value={formBed} onChange={(e) => setFormBed(e.target.value)} required className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-sm text-white focus:outline-none focus:border-indigo-500" />
                 </div>
                 <div>
-                  <label className="block text-xs font-bold text-slate-300 mb-1">Patient MRN (Auto-ID)</label>
+                  <label className="block text-xs font-bold text-slate-300 mb-1">Patient MRN</label>
                   <input value={formMrn} onChange={(e) => setFormMrn(e.target.value)} required className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-sm font-mono text-indigo-300 focus:outline-none" />
                 </div>
               </div>
@@ -853,23 +703,12 @@ export default function SmartWardCentral() {
                     <option value="Emergency">Emergency</option>
                     <option value="Elective / Planned">Elective / Planned</option>
                     <option value="ICU Transfer">ICU Transfer</option>
-                    <option value="Trauma / Critical">Trauma / Critical</option>
                   </select>
                 </div>
                 <div>
                   <label className="block text-xs font-bold text-slate-300 mb-1">Attending Doctor</label>
                   <input value={formDoctor} onChange={(e) => setFormDoctor(e.target.value)} required className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-sm text-white focus:outline-none" />
                 </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-300 mb-1">Contact Phone Number</label>
-                <input value={formPhone} onChange={(e) => setFormPhone(e.target.value)} className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-sm text-white focus:outline-none" />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-300 mb-1">Residential Address</label>
-                <input value={formAddress} onChange={(e) => setFormAddress(e.target.value)} className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-sm text-white focus:outline-none" />
               </div>
 
               <button type="submit" className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold transition shadow">
@@ -880,14 +719,14 @@ export default function SmartWardCentral() {
         </div>
       )}
 
-      {/* MODAL: Available Bed & Patient QR Studio / Auto-Binding */}
+      {/* MODAL: Auto-Pairing Studio (QRs for Bed, Patient, and Hardware) */}
       {showBedQrStudio && (
         <div className="fixed inset-0 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-800 rounded-2xl max-w-xl w-full p-6 shadow-2xl border border-slate-700 max-h-[92vh] overflow-y-auto">
+          <div className="bg-slate-800 rounded-2xl max-w-2xl w-full p-6 shadow-2xl border border-slate-700 max-h-[92vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-slate-700">
               <div className="flex items-center space-x-2">
                 <Sparkles className="w-5 h-5 text-violet-400" />
-                <h3 className="text-base font-bold text-white">Smart Bed & Patient Allocation Studio</h3>
+                <h3 className="text-base font-bold text-white">Smart Fleet & Equipment Allocation Studio</h3>
               </div>
               <button onClick={() => setShowBedQrStudio(false)} className="text-slate-400 hover:text-white">
                 <X className="w-5 h-5" />
@@ -895,52 +734,58 @@ export default function SmartWardCentral() {
             </div>
 
             <p className="text-xs text-slate-400 mt-2">
-              Automatically calculates the lowest available bed slot and next patient MRN to prevent human error.
+              Lowest free bed, patient MRN, and hardware serials automatically selected from hospital inventory.
             </p>
 
-            {/* Individual QRs */}
-            <div className="grid grid-cols-2 gap-3 mt-4">
+            <div className="grid grid-cols-3 gap-3 mt-4">
               <div className="p-3 bg-slate-900 rounded-xl border border-slate-700 text-center flex flex-col items-center">
-                <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider">Suggested Available Bed</span>
-                <p className="text-lg font-black text-white mt-0.5">{formBed}</p>
+                <span className="text-[10px] font-bold text-emerald-400 uppercase">Available Bed</span>
+                <p className="text-sm font-black text-white mt-0.5">{suggestedBed}</p>
                 <div className="p-2 bg-white rounded-lg mt-2">
-                  <QRCodeSVG value={`BED:${formBed}`} size={110} level="H" />
+                  <QRCodeSVG value={`BED:${suggestedBed}`} size={85} level="H" />
                 </div>
-                <span className="text-[10px] font-mono text-slate-400 mt-1">BED:{formBed}</span>
+                <span className="text-[9px] font-mono text-slate-400 mt-1">BED:{suggestedBed}</span>
               </div>
 
               <div className="p-3 bg-slate-900 rounded-xl border border-slate-700 text-center flex flex-col items-center">
-                <span className="text-[10px] font-bold text-cyan-400 uppercase tracking-wider">Suggested Patient MRN</span>
-                <p className="text-lg font-black text-white mt-0.5">{formMrn}</p>
+                <span className="text-[10px] font-bold text-cyan-400 uppercase">Available MRN</span>
+                <p className="text-sm font-black text-white mt-0.5">{suggestedMrn}</p>
                 <div className="p-2 bg-white rounded-lg mt-2">
-                  <QRCodeSVG value={`MRN:${formMrn}`} size={110} level="H" />
+                  <QRCodeSVG value={`MRN:${suggestedMrn}`} size={85} level="H" />
                 </div>
-                <span className="text-[10px] font-mono text-slate-400 mt-1">MRN:{formMrn}</span>
+                <span className="text-[9px] font-mono text-slate-400 mt-1">MRN:{suggestedMrn}</span>
+              </div>
+
+              <div className="p-3 bg-slate-900 rounded-xl border border-slate-700 text-center flex flex-col items-center">
+                <span className="text-[10px] font-bold text-indigo-400 uppercase">Next Free SP</span>
+                <p className="text-sm font-black text-white mt-0.5">{fleetSp}</p>
+                <div className="p-2 bg-white rounded-lg mt-2">
+                  <QRCodeSVG value={`PUMP:${fleetSp}`} size={85} level="H" />
+                </div>
+                <span className="text-[9px] font-mono text-slate-400 mt-1">PUMP:{fleetSp}</span>
               </div>
             </div>
 
-            {/* Combination 2-in-1 Token */}
             <div className="mt-4 p-4 bg-slate-900 rounded-xl border border-slate-700 flex flex-col items-center justify-center">
-              <span className="text-xs font-bold text-violet-300 mb-2">Combination Bed + Patient 2-in-1 Token</span>
+              <span className="text-xs font-bold text-violet-300 mb-2">Combination Bed + Patient Pairing Token</span>
               <div className="p-2 bg-white rounded-lg">
-                <QRCodeSVG value={`BED:${formBed}|MRN:${formMrn}`} size={140} level="H" />
+                <QRCodeSVG value={`BED:${suggestedBed}|MRN:${suggestedMrn}`} size={120} level="H" />
               </div>
-              <span className="text-[11px] font-mono text-slate-400 mt-2 break-all text-center">
-                BED:{formBed}|MRN:{formMrn}
-              </span>
+              <span className="text-[10px] font-mono text-slate-400 mt-2">BED:{suggestedBed}|MRN:{suggestedMrn}</span>
             </div>
 
-            {/* Action: Auto-Populate & Open Admission Form */}
             <div className="mt-5 flex gap-2">
               <button
                 type="button"
                 onClick={() => {
+                  setFormBed(suggestedBed);
+                  setFormMrn(suggestedMrn);
                   setShowBedQrStudio(false);
                   setShowAdmissionModal(true);
                 }}
                 className="flex-1 py-3 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-bold transition shadow flex items-center justify-center gap-2"
               >
-                <span>🚀 Bind {formBed} & {formMrn} → Proceed to Admission</span>
+                <span>🚀 Bind {suggestedBed} & {suggestedMrn} → Admit Patient</span>
               </button>
               <button
                 type="button"
@@ -960,395 +805,53 @@ export default function SmartWardCentral() {
           <div className="bg-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-700">
             <div className="flex items-center justify-between pb-3 border-b border-slate-700">
               <div>
-                <h3 className="text-base font-bold text-white">Attach Telemetry Device</h3>
+                <h3 className="text-base font-bold text-white">Attach Telemetry Equipment</h3>
                 <p className="text-xs text-slate-400">Target: {targetBedForDevice.bed_number} ({targetBedForDevice.patient_name})</p>
               </div>
-              <button 
-                onClick={async () => {
-                  if (deviceQrScannerRef.current?.isScanning) await deviceQrScannerRef.current.stop();
-                  setDeviceCameraActive(false);
-                  setShowAttachDeviceModal(false);
-                }} 
-                className="text-slate-400 hover:text-white"
-              >
+              <button onClick={() => setShowAttachDeviceModal(false)} className="text-slate-400 hover:text-white">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="grid grid-cols-2 gap-2 mt-4 bg-slate-900 p-1 rounded-xl border border-slate-700">
-              <button
-                type="button"
-                onClick={async () => {
-                  if (deviceQrScannerRef.current?.isScanning) await deviceQrScannerRef.current.stop();
-                  setDeviceCameraActive(false);
-                  setAttachTab('AUTO');
-                }}
-                className={`py-1.5 text-xs font-bold rounded-lg transition ${attachTab === 'AUTO' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
-              >
-                Auto-Select & QR Code
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setAttachTab('CAMERA');
-                  setDeviceCameraActive(true);
-                }}
-                className={`py-1.5 text-xs font-bold rounded-lg transition ${attachTab === 'CAMERA' ? 'bg-indigo-600 text-white shadow' : 'text-slate-400 hover:text-white'}`}
-              >
-                📷 Live Camera Scanner
-              </button>
-            </div>
-
-            {attachTab === 'AUTO' ? (
-              <div className="mt-4 space-y-4">
-                <div>
-                  <label className="block text-xs font-bold text-slate-300 mb-1">Select Device Category</label>
-                  <select
-                    value={selectedDeviceType}
-                    onChange={(e) => setSelectedDeviceType(e.target.value as DeviceType)}
-                    className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-sm text-white focus:outline-none"
-                  >
-                    <option value="SYRINGE_PUMP">💉 Syringe Infusion Pump (SP)</option>
-                    <option value="PATIENT_MONITOR">🫀 Multi-Para Patient Monitor (PM)</option>
-                    <option value="DIALYSIS">🩸 Hemodialysis / CRRT Unit (DL)</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-slate-300 mb-1">Hardware Serial Number</label>
-                  <input
-                    value={deviceSerialId}
-                    onChange={(e) => setDeviceSerialId(e.target.value)}
-                    required
-                    className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-sm font-mono text-indigo-300 focus:outline-none"
-                  />
-                </div>
-
-                <div className="p-4 bg-slate-900 rounded-xl border border-slate-700 flex flex-col items-center justify-center">
-                  <span className="text-[11px] text-slate-400 font-semibold mb-2">Hardware Chassis Pairing Token</span>
-                  <div className="p-2 bg-white rounded-lg">
-                    <QRCodeSVG value={`${selectedDeviceType}:${deviceSerialId}`} size={130} level="H" />
-                  </div>
-                  <span className="text-[10px] font-mono text-slate-400 mt-2">{selectedDeviceType}:{deviceSerialId}</span>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => handleAttachDeviceSubmit()}
-                  className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold transition shadow"
-                >
-                  Confirm & Attach to Bed Station
-                </button>
-              </div>
-            ) : (
-              <div className="mt-4 space-y-3">
-                <p className="text-xs text-slate-400 text-center">{deviceScanStatus}</p>
-                <div className="rounded-xl overflow-hidden border border-slate-700 bg-black min-h-[220px] flex items-center justify-center">
-                  <div id="device-qr-reader" className="w-full h-full" />
-                </div>
-                <p className="text-[11px] text-slate-400 text-center">Point camera at sticker: <code>PUMP:...</code>, <code>MONITOR:...</code>, or <code>DIALYSIS:...</code></p>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* MODAL: Attach Diagnostic Reports with Wristband Scanner */}
-      {showLabModal && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-800 rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-700 max-h-[92vh] overflow-y-auto">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-700">
-              <div className="flex items-center space-x-2">
-                <FlaskConical className="w-5 h-5 text-emerald-400" />
-                <h3 className="text-base font-bold text-white">Attach Diagnostic / Lab Report</h3>
-              </div>
-              <button 
-                onClick={async () => {
-                  if (labQrScannerRef.current?.isScanning) await labQrScannerRef.current.stop();
-                  setLabCameraActive(false);
-                  setShowLabModal(false);
-                }} 
-                className="text-slate-400 hover:text-white"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {labCameraActive && (
-              <div className="mt-3 p-3 bg-slate-950 rounded-xl border border-slate-700 text-center space-y-2">
-                <div className="flex items-center justify-between text-xs text-emerald-400 font-semibold px-1">
-                  <span className="flex items-center gap-1"><Camera className="w-3.5 h-3.5 animate-pulse" /> {labScanStatus}</span>
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      if (labQrScannerRef.current?.isScanning) await labQrScannerRef.current.stop();
-                      setLabCameraActive(false);
-                    }}
-                    className="text-slate-400 hover:text-white text-xs bg-slate-800 px-2 py-0.5 rounded"
-                  >
-                    Close
-                  </button>
-                </div>
-                <div className="rounded-lg overflow-hidden min-h-[200px] flex items-center justify-center bg-black">
-                  <div id="lab-qr-reader" className="w-full h-full" />
-                </div>
-              </div>
-            )}
-
-            <form onSubmit={handleAttachReport} className="mt-4 space-y-4">
+            <div className="mt-4 space-y-4">
               <div>
-                <div className="flex justify-between items-center mb-1">
-                  <label className="block text-xs font-bold text-slate-300">Target Patient MRN</label>
-                  {!labCameraActive && (
-                    <button
-                      type="button"
-                      onClick={() => setLabCameraActive(true)}
-                      className="flex items-center space-x-1 text-[11px] font-bold text-emerald-400 bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-700 px-2 py-0.5 rounded-lg transition"
-                    >
-                      <Camera className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>Scan Patient Wristband</span>
-                    </button>
-                  )}
-                </div>
-                <input
-                  value={labMrn}
-                  onChange={(e) => setLabMrn(e.target.value)}
-                  placeholder="e.g. PTN-000001"
-                  required
-                  className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-sm font-mono text-white focus:outline-none"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-slate-300 mb-1">Department</label>
-                  <select
-                    value={labDept}
-                    onChange={(e) => {
-                      setLabDept(e.target.value);
-                      if (e.target.value === 'RADIOLOGY') setLabTestName('Chest X-Ray AP View');
-                      else setLabTestName('Complete Blood Count (CBC)');
-                    }}
-                    className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-sm text-white focus:outline-none"
-                  >
-                    <option value="PATHOLOGY">Pathology (Blood/Urine)</option>
-                    <option value="RADIOLOGY">Radiology (X-Ray/Scans)</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-300 mb-1">Investigation Name</label>
-                  <input
-                    value={labTestName}
-                    onChange={(e) => setLabTestName(e.target.value)}
-                    required
-                    className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-sm text-white focus:outline-none"
-                  />
-                </div>
-              </div>
-
-              {labDept === 'PATHOLOGY' ? (
-                <div className="grid grid-cols-3 gap-2 bg-slate-900 p-3 rounded-xl border border-slate-700">
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-400">Hb (g/dL)</label>
-                    <input value={labHb} onChange={(e) => setLabHb(e.target.value)} className="w-full px-2 py-1 bg-slate-800 rounded border border-slate-700 text-xs text-white mt-1" />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-400">WBC (/mcL)</label>
-                    <input value={labWbc} onChange={(e) => setLabWbc(e.target.value)} className="w-full px-2 py-1 bg-slate-800 rounded border border-slate-700 text-xs text-white mt-1" />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-400">Platelets</label>
-                    <input value={labPlatelets} onChange={(e) => setLabPlatelets(e.target.value)} className="w-full px-2 py-1 bg-slate-800 rounded border border-slate-700 text-xs text-white mt-1" />
-                  </div>
-                </div>
-              ) : null}
-
-              <div>
-                <label className="block text-xs font-bold text-slate-300 mb-1">Clinical Observation / Notes</label>
-                <textarea
-                  value={labNotes}
-                  onChange={(e) => setLabNotes(e.target.value)}
-                  rows={2}
-                  placeholder="e.g. Normal blood morphology or Clear lung fields"
+                <label className="block text-xs font-bold text-slate-300 mb-1">Select Hardware Type</label>
+                <select
+                  value={selectedDeviceType}
+                  onChange={(e) => setSelectedDeviceType(e.target.value as DeviceType)}
                   className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-sm text-white focus:outline-none"
-                />
-              </div>
-
-              <button
-                type="submit"
-                disabled={labLoading}
-                className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-sm font-bold transition shadow"
-              >
-                {labLoading ? 'Attaching...' : 'Attach Investigation to Encounter'}
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL: Printable Multi-Device Clinical Dossier */}
-      {showDossierModal && selectedPatientDossier && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl max-w-3xl w-full p-8 shadow-2xl max-h-[90vh] flex flex-col text-slate-900">
-            <div className="flex items-center justify-between pb-4 border-b border-slate-200">
-              <div className="flex items-center space-x-3">
-                <Building2 className="w-8 h-8 text-indigo-600" />
-                <div>
-                  <h2 className="text-xl font-black tracking-tight uppercase">Pulse Hospital & Critical Care Network</h2>
-                  <p className="text-xs text-slate-500">Inpatient Clinical Summary & Multi-Parameter Encounter Dossier</p>
-                </div>
-              </div>
-              <button onClick={() => setShowDossierModal(false)} className="text-slate-400 hover:text-slate-600"><X className="w-6 h-6" /></button>
-            </div>
-
-            <div className="mt-4 flex-1 overflow-y-auto space-y-6 pr-2">
-              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
-                <h4 className="text-xs font-bold uppercase tracking-wider text-indigo-700 mb-3 flex items-center gap-1.5">
-                  <User className="w-4 h-4" /> Patient Demographics & Encounter Details
-                </h4>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
-                  <div><span className="text-slate-400 block text-[10px]">Patient Name</span><span className="font-bold text-sm text-slate-900">{selectedPatientDossier.patient_name}</span></div>
-                  <div><span className="text-slate-400 block text-[10px]">MRN</span><span className="font-mono font-bold text-blue-700">{selectedPatientDossier.patient_mrn}</span></div>
-                  <div><span className="text-slate-400 block text-[10px]">Age / Gender</span><span className="font-semibold">{selectedPatientDossier.age} Y / {selectedPatientDossier.gender}</span></div>
-                  <div><span className="text-slate-400 block text-[10px]">Blood Group</span><span className="font-bold text-rose-600">{selectedPatientDossier.blood_group}</span></div>
-                  <div><span className="text-slate-400 block text-[10px]">Admitted On</span><span className="font-semibold">{selectedPatientDossier.admission?.admitted_at}</span></div>
-                  <div><span className="text-slate-400 block text-[10px]">Discharged On</span><span className="font-semibold">{selectedPatientDossier.admission?.discharged_at}</span></div>
-                  <div><span className="text-slate-400 block text-[10px]">Admission Type</span><span className="font-semibold">{selectedPatientDossier.admission?.admission_type}</span></div>
-                  <div><span className="text-slate-400 block text-[10px]">Discharge Status</span><span className="font-semibold text-emerald-700">{selectedPatientDossier.admission?.discharge_type}</span></div>
-                  <div className="col-span-2"><span className="text-slate-400 block text-[10px]">Attending Consultant</span><span className="font-semibold">{selectedPatientDossier.admission?.attending_doctor}</span></div>
-                  <div className="col-span-2"><span className="text-slate-400 block text-[10px]">Contact & Address</span><span className="font-semibold">{selectedPatientDossier.phone_number} | {selectedPatientDossier.address}</span></div>
-                </div>
+                >
+                  <option value="SYRINGE_PUMP">💉 Syringe Pump ({fleetSp} Available)</option>
+                  <option value="PATIENT_MONITOR">🫀 Patient Monitor ({fleetPm} Available)</option>
+                  <option value="DIALYSIS">🩸 Dialysis Unit ({fleetDl} Available)</option>
+                </select>
               </div>
 
               <div>
-                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3 flex items-center gap-1.5">
-                  <FlaskConical className="w-4 h-4 text-emerald-600" /> Attached Diagnostic Investigations ({selectedPatientDossier.total_reports})
-                </h4>
-                {selectedPatientDossier.reports?.length === 0 ? (
-                  <p className="text-xs text-slate-400 italic bg-slate-50 p-4 rounded-xl text-center">No diagnostic investigations recorded for this admission encounter.</p>
-                ) : (
-                  <div className="space-y-3">
-                    {selectedPatientDossier.reports?.map((rpt: any) => (
-                      <div key={rpt.report_id} className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 text-xs space-y-2">
-                        <div className="flex justify-between items-center">
-                          <span className="font-bold text-slate-900">{rpt.test_name}</span>
-                          <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">{rpt.department}</span>
-                        </div>
-                        {rpt.parameters && (
-                          <div className="grid grid-cols-3 gap-2 bg-white p-2 rounded-lg border border-slate-200">
-                            {Object.entries(rpt.parameters).map(([k, v]: any) => (
-                              <div key={k}><span className="text-slate-400 block text-[10px]">{k}</span><span className="font-bold text-slate-800">{v}</span></div>
-                            ))}
-                          </div>
-                        )}
-                        {rpt.notes && <p className="text-slate-600 italic">"Findings: {rpt.notes}"</p>}
-                        <div className="text-[10px] text-slate-400 flex justify-between pt-1 border-t border-slate-200/60">
-                          <span>Recorded by: {rpt.technician}</span>
-                          <span>{rpt.created_at}</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                <label className="block text-xs font-bold text-slate-300 mb-1">Hardware Serial ID (Auto-Allocated)</label>
+                <input
+                  value={deviceSerialId}
+                  onChange={(e) => setDeviceSerialId(e.target.value)}
+                  required
+                  className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-sm font-mono text-indigo-300 focus:outline-none"
+                />
               </div>
 
-              <div className="bg-indigo-50/60 p-4 rounded-xl border border-indigo-100">
-                <h4 className="text-xs font-bold uppercase tracking-wider text-indigo-800 mb-2 flex items-center gap-1.5">
-                  <ShieldCheck className="w-4 h-4 text-indigo-600" /> Multi-Parameter Telemetry Delivery Audit
-                </h4>
-                <div className="grid grid-cols-3 gap-3 text-xs mt-2">
-                  <div><span className="text-slate-500 block text-[10px]">Primary Infusion Pump</span><span className="font-mono font-bold text-slate-800">{selectedPatientDossier.telemetry_summary?.pump_id || '--'}</span></div>
-                  <div><span className="text-slate-500 block text-[10px]">Total Medication Delivered</span><span className="font-bold text-indigo-700 text-sm">{selectedPatientDossier.telemetry_summary?.total_volume_ml?.toFixed(1) || '0.0'} mL</span></div>
-                  <div><span className="text-slate-500 block text-[10px]">Mean Infusion Pressure</span><span className="font-bold text-slate-800 text-sm">{selectedPatientDossier.telemetry_summary?.avg_pressure_kpa || '0.0'} kPa</span></div>
+              <div className="p-4 bg-slate-900 rounded-xl border border-slate-700 flex flex-col items-center justify-center">
+                <span className="text-[11px] text-slate-400 font-semibold mb-2">Equipment Chassis QR</span>
+                <div className="p-2 bg-white rounded-lg">
+                  <QRCodeSVG value={`${selectedDeviceType}:${deviceSerialId}`} size={120} level="H" />
                 </div>
+                <span className="text-[10px] font-mono text-slate-400 mt-2">{selectedDeviceType}:{deviceSerialId}</span>
               </div>
 
-              <div className="pt-4 border-t border-slate-200 flex justify-between items-end text-xs text-slate-500">
-                <div>
-                  <p>Certified Electronic Clinical Record</p>
-                  <p className="text-[10px] text-slate-400 font-mono">Encounter-UUID: {selectedPatientDossier.admission?.admission_id}</p>
-                </div>
-                <div className="text-center">
-                  <div className="w-40 border-b border-slate-400 mb-1 pb-4 text-slate-400 italic">Medical Officer Sign</div>
-                  <span className="font-bold text-slate-700">{selectedPatientDossier.admission?.attending_doctor}</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-6 pt-4 border-t border-slate-200 flex justify-between">
               <button
-                onClick={() => window.print()}
-                className="flex items-center space-x-1.5 px-4 py-2 bg-slate-900 text-white rounded-xl text-xs font-bold hover:bg-slate-800 transition shadow"
+                type="button"
+                onClick={() => handleAttachDeviceSubmit()}
+                className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold transition shadow"
               >
-                <Printer className="w-4 h-4" />
-                <span>Print Official Hospital Dossier</span>
+                Confirm & Bind Equipment to Bed
               </button>
-              <button
-                onClick={() => setShowDossierModal(false)}
-                className="px-4 py-2 bg-slate-100 text-slate-700 rounded-xl text-xs font-bold hover:bg-slate-200"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL: Discharged Records */}
-      {showDischargedModal && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-800 rounded-2xl max-w-4xl w-full p-6 shadow-2xl border border-slate-700 max-h-[90vh] flex flex-col">
-            <div className="flex items-center justify-between pb-4 border-b border-slate-700">
-              <div className="flex items-center space-x-2">
-                <FolderClock className="w-5 h-5 text-amber-400" />
-                <h3 className="text-lg font-bold text-white">Discharged Inpatient Records</h3>
-              </div>
-              <button onClick={() => setShowDischargedModal(false)} className="text-slate-400 hover:text-white"><X className="w-5 h-5" /></button>
-            </div>
-
-            <div className="mt-4 flex-1 overflow-y-auto">
-              {dischargedRecords.length === 0 ? (
-                <div className="p-8 text-center text-slate-400 text-sm">No historical records found.</div>
-              ) : (
-                <table className="w-full text-left text-xs text-slate-300">
-                  <thead className="bg-slate-900 text-slate-400 font-semibold border-b border-slate-700 sticky top-0">
-                    <tr>
-                      <th className="p-3">Patient MRN & Name</th>
-                      <th className="p-3">Bed Station</th>
-                      <th className="p-3">Timeline</th>
-                      <th className="p-3">Discharge Outcome</th>
-                      <th className="p-3 text-right">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-700/60">
-                    {dischargedRecords.map((rec) => (
-                      <tr key={rec.association_id} className="hover:bg-slate-700/40">
-                        <td className="p-3 font-medium text-white">{rec.patient_name} <span className="block font-mono text-[10px] text-indigo-400">{rec.patient_id}</span></td>
-                        <td className="p-3 font-semibold">{rec.bed_number}</td>
-                        <td className="p-3 text-[11px] text-slate-400">
-                          <div>Discharged: {rec.discharged_at ? new Date(rec.discharged_at).toLocaleDateString() : '--'}</div>
-                        </td>
-                        <td className="p-3 text-emerald-400 font-semibold">{rec.discharge_type || 'Routine'}</td>
-                        <td className="p-3 text-right">
-                          <button
-                            onClick={() => {
-                              setShowDischargedModal(false);
-                              openDossier(rec.patient_id);
-                            }}
-                            className="px-2.5 py-1 text-xs font-semibold bg-indigo-950 text-indigo-300 border border-indigo-700 rounded-lg hover:bg-indigo-900"
-                          >
-                            Dossier
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-
-            <div className="mt-4 pt-3 border-t border-slate-700 flex justify-end">
-              <button onClick={() => setShowDischargedModal(false)} className="px-4 py-2 bg-slate-700 text-white rounded-xl text-xs font-bold hover:bg-slate-600">Close</button>
             </div>
           </div>
         </div>
