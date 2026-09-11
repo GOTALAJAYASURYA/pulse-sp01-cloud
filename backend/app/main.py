@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import asyncio
 from datetime import datetime, timezone
@@ -83,7 +84,7 @@ class AttachDeviceRequest(BaseModel):
     patient_mrn: str
     admission_id: Optional[str] = None
     device_id: str
-    device_type: str  # 'PATIENT_MONITOR', 'SYRINGE_PUMP', 'DIALYSIS'
+    device_type: str
 
 class UnbindDeviceRequest(BaseModel):
     device_id: str
@@ -110,26 +111,40 @@ def health_check():
 
 @app.get("/api/v1/registry-status")
 def get_registry_status(db: Session = Depends(get_db)):
-    """Fetch all active bed encounters and their dynamically attached devices."""
+    """Fetch unique active bed encounters and compute the lowest free bed slot."""
     try:
-        # Fetch all occupied/active admissions
-        active_admissions = (
+        all_active_admissions = (
             db.query(Admission)
             .filter(Admission.status == "ADMITTED")
             .order_by(Admission.admitted_at.desc())
             .all()
         )
 
-        bed_list = []
-        busy_beds = set()
+        seen_beds = set()
+        occupied_bed_numbers = set()
+        unique_admissions = []
 
-        for adm in active_admissions:
-            busy_beds.add(adm.bed_id)
-            patient = db.query(Patient).filter(Patient.patient_id == adm.patient_id).first()
-            bed = db.query(Bed).filter(Bed.bed_id == adm.bed_id).first()
+        for adm in all_active_admissions:
+            bed = db.query(Bed).filter((Bed.bed_id == adm.bed_id) | (Bed.bed_number == adm.bed_id)).first()
             bed_num = bed.bed_number if bed else adm.bed_id
 
-            # Query all active devices attached to this admission
+            # Dedup: If duplicate admissions for this bed exist, retire older ones
+            if bed_num in seen_beds:
+                adm.status = "DISCHARGED"
+                adm.discharged_at = datetime.now(timezone.utc)
+                adm.discharge_type = "System Auto-Clean Duplicate"
+                continue
+
+            seen_beds.add(bed_num)
+            occupied_bed_numbers.add(bed_num)
+            unique_admissions.append((adm, bed_num))
+
+        db.commit()
+
+        bed_list = []
+        for adm, bed_num in unique_admissions:
+            patient = db.query(Patient).filter(Patient.patient_id == adm.patient_id).first()
+
             active_devices = (
                 db.query(DeviceAssociation)
                 .filter(
@@ -141,7 +156,6 @@ def get_registry_status(db: Session = Depends(get_db)):
 
             dev_list = []
             for d in active_devices:
-                # Resolve device type
                 dtype = getattr(d, "device_type", None)
                 if not dtype:
                     if d.pump_id.startswith("PM-"):
@@ -175,20 +189,33 @@ def get_registry_status(db: Session = Depends(get_db)):
                 "devices": dev_list
             })
 
-        # Calculate next suggested bed index
-        idx = 1
-        while f"ICU-B{idx}" in busy_beds:
-            idx += 1
-        next_bed = f"ICU-B{idx}"
+        # Sort beds naturally (ICU-B1, ICU-B2, etc.)
+        def bed_sort_key(item):
+            digits = re.findall(r'\d+', item['bed_number'])
+            return int(digits[0]) if digits else 9999
+        bed_list.sort(key=bed_sort_key)
 
-        total_patients = db.query(Patient).count()
-        next_mrn = f"PTN-{str(total_patients + 1).zfill(6)}"
+        # Lowest available free bed calculation (1, 2, 3, ...)
+        occupied_indices = set()
+        for b_str in occupied_bed_numbers:
+            digits = re.findall(r'\d+', b_str)
+            if digits:
+                occupied_indices.add(int(digits[0]))
+
+        lowest_free_idx = 1
+        while lowest_free_idx in occupied_indices:
+            lowest_free_idx += 1
+
+        next_available_bed = f"ICU-B{lowest_free_idx}"
+
+        total_pts = db.query(Patient).count()
+        next_mrn = f"PTN-{str(total_pts + 1).zfill(6)}"
 
         return {
             "active_associations": bed_list,
             "beds": bed_list,
             "next_suggestions": {
-                "bed": next_bed,
+                "bed": next_available_bed,
                 "mrn": next_mrn
             }
         }
@@ -198,18 +225,33 @@ def get_registry_status(db: Session = Depends(get_db)):
 
 @app.post("/api/v1/admit-patient")
 def admit_patient(req: AdmitPatientRequest, db: Session = Depends(get_db)):
-    """Admit patient to an ICU Bed directly without requiring an upfront device."""
+    """Admit patient to an ICU Bed with strict duplicate prevention."""
     try:
         now = datetime.now(timezone.utc)
 
-        # 1. Ensure Ward exists
+        # Reject if bed is already occupied
+        existing_admission = (
+            db.query(Admission)
+            .filter(
+                (Admission.bed_id == req.bed_number),
+                Admission.status == "ADMITTED"
+            )
+            .first()
+        )
+        if existing_admission:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Bed Station {req.bed_number} is already occupied! Discharge the active patient or pick another bed."
+            )
+
+        # Ensure Ward exists
         ward = db.query(Ward).filter(Ward.ward_id == "icu-ward-a").first()
         if not ward:
             ward = Ward(ward_id="icu-ward-a", name="Main ICU Wing", ward_type="ICU")
             db.add(ward)
             db.flush()
 
-        # 2. Ensure Bed exists & check occupancy
+        # Ensure Bed exists
         bed = db.query(Bed).filter((Bed.bed_id == req.bed_number) | (Bed.bed_number == req.bed_number)).first()
         if not bed:
             bed = Bed(
@@ -223,7 +265,7 @@ def admit_patient(req: AdmitPatientRequest, db: Session = Depends(get_db)):
         else:
             bed.current_status = "OCCUPIED"
 
-        # 3. Create or update Patient record
+        # Create or update Patient record
         name_parts = req.patient_name.strip().split(" ", 1)
         first_name = name_parts[0] if name_parts[0] else "Patient"
         last_name = name_parts[1] if len(name_parts) > 1 else ""
@@ -251,7 +293,6 @@ def admit_patient(req: AdmitPatientRequest, db: Session = Depends(get_db)):
             patient.phone_number = req.phone_number
             patient.address = req.address
 
-        # 4. Create active Admission Encounter
         admission = Admission(
             admission_id=uuid.uuid4(),
             patient_id=patient.patient_id,
@@ -266,18 +307,19 @@ def admit_patient(req: AdmitPatientRequest, db: Session = Depends(get_db)):
         db.commit()
 
         return {"status": "success", "bed_number": req.bed_number, "patient_mrn": req.patient_mrn}
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as e:
         db.rollback()
-        print(f"[!] Admission error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/devices/attach")
 def attach_device_to_bed(req: AttachDeviceRequest, db: Session = Depends(get_db)):
-    """Dynamically attach any telemetry device (PM, SP, DL) to an active bed."""
+    """Attach any telemetry device (PM, SP, DL) dynamically."""
     try:
         now = datetime.now(timezone.utc)
 
-        # Ensure device isn't already active elsewhere
         existing_active = db.query(DeviceAssociation).filter(
             DeviceAssociation.pump_id == req.device_id,
             DeviceAssociation.unpaired_at.is_(None)
@@ -289,7 +331,6 @@ def attach_device_to_bed(req: AttachDeviceRequest, db: Session = Depends(get_db)
                 detail=f"Hardware {req.device_id} is already in active use at another bed!"
             )
 
-        # Locate active admission for this bed
         adm = None
         if req.admission_id:
             try:
@@ -309,7 +350,6 @@ def attach_device_to_bed(req: AttachDeviceRequest, db: Session = Depends(get_db)
         if not adm:
             raise HTTPException(status_code=404, detail=f"No active admitted patient found at bed {req.bed_number}")
 
-        # Ensure device exists in Pump/Device registry
         pump_rec = db.query(Pump).filter(Pump.pump_id == req.device_id).first()
         if not pump_rec:
             model_map = {
@@ -334,7 +374,6 @@ def attach_device_to_bed(req: AttachDeviceRequest, db: Session = Depends(get_db)
             paired_at=now,
             paired_by_user_id="DUTY-NURSE-01"
         )
-        # Store device_type if column exists
         if hasattr(assoc, "device_type"):
             setattr(assoc, "device_type", req.device_type)
 
@@ -371,7 +410,7 @@ def unbind_single_device(req: UnbindDeviceRequest, db: Session = Depends(get_db)
 
 @app.post("/api/v1/discharge-encounter")
 def discharge_encounter(req: DischargeEncounterRequest, db: Session = Depends(get_db)):
-    """Discharge patient encounter and release bed + all attached hardware."""
+    """Discharge patient encounter and release bed + attached hardware."""
     try:
         now = datetime.now(timezone.utc)
         bed = db.query(Bed).filter((Bed.bed_id == req.bed_number) | (Bed.bed_number == req.bed_number)).first()
@@ -387,7 +426,6 @@ def discharge_encounter(req: DischargeEncounterRequest, db: Session = Depends(ge
             adm.discharged_at = now
             adm.discharge_type = req.discharge_type
 
-            # Unbind all currently attached devices
             active_devices = db.query(DeviceAssociation).filter(
                 DeviceAssociation.admission_id == adm.admission_id,
                 DeviceAssociation.unpaired_at.is_(None)
@@ -407,7 +445,7 @@ def discharge_encounter(req: DischargeEncounterRequest, db: Session = Depends(ge
 
 @app.post("/api/v1/reports/attach")
 def attach_diagnostic_report(req: ReportAttachRequest, db: Session = Depends(get_db)):
-    """Attach blood/lab/scan diagnostics directly to patient encounter."""
+    """Attach laboratory or radiology diagnostics to the patient record."""
     try:
         patient = db.query(Patient).filter(Patient.patient_id == req.patient_mrn).first()
         if not patient:
@@ -440,7 +478,7 @@ def attach_diagnostic_report(req: ReportAttachRequest, db: Session = Depends(get
 
 @app.get("/api/v1/patient-dossier/{patient_id}")
 def get_patient_dossier(patient_id: str, db: Session = Depends(get_db)):
-    """Fetch unified dossier with demographics, admission info, diagnostic reports, and telemetry audit."""
+    """Fetch complete patient dossier including reports and telemetry summaries."""
     try:
         patient = db.query(Patient).filter(Patient.patient_id == patient_id).first()
         if not patient:
