@@ -17,11 +17,12 @@ class Bed(Base):
     bed_number = Column(String(50), unique=True, nullable=False)
     current_status = Column(String(20), default="AVAILABLE")
 
-class Pump(Base):
-    __tablename__ = "pumps"
-    pump_id = Column(String(64), primary_key=True)
-    model_name = Column(String(50), default="Pulse SP-01")
-    firmware_version = Column(String(30), nullable=False)
+class Device(Base):
+    __tablename__ = "devices"
+    device_id = Column(String(64), primary_key=True)
+    device_type = Column(String(30), nullable=False)  # "SYRINGE_PUMP", "PATIENT_MONITOR", "DIALYSIS"
+    model_name = Column(String(50), default="Pulse Pro Series")
+    firmware_version = Column(String(30), default="v2.1.0")
     status = Column(String(30), default="ONLINE")
     last_heartbeat = Column(DateTime(timezone=True))
 
@@ -42,10 +43,10 @@ class Admission(Base):
     patient_id = Column(String(64), ForeignKey("patients.patient_id"))
     bed_id = Column(String(64), ForeignKey("beds.bed_id"))
     primary_diagnosis = Column(String, default="Clinical Monitoring & Infusion")
-    admission_type = Column(String(50), default="Emergency") # Emergency, Elective, ICU Transfer, Trauma
+    admission_type = Column(String(50), default="Emergency")
     attending_doctor = Column(String(100), default="Duty Medical Officer")
     admitted_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    discharge_type = Column(String(50), nullable=True) # Routine, Transferred, DOR, LAMA
+    discharge_type = Column(String(50), nullable=True)
     discharged_at = Column(DateTime(timezone=True), nullable=True)
     status = Column(String(20), default="ADMITTED")
 
@@ -54,21 +55,18 @@ class DeviceAssociation(Base):
     association_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     admission_id = Column(UUID(as_uuid=True), ForeignKey("admissions.admission_id"))
     bed_id = Column(String(64), ForeignKey("beds.bed_id"))
-    pump_id = Column(String(64), ForeignKey("pumps.pump_id"))
+    device_id = Column(String(64), ForeignKey("devices.device_id"))
+    device_type = Column(String(30), nullable=False)
     paired_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     unpaired_at = Column(DateTime(timezone=True), nullable=True)
-    paired_by_user_id = Column(String(64), nullable=False)
+    paired_by_user_id = Column(String(64), default="CLINICAL-NURSE-01")
 
-class PumpTelemetryLog(Base):
-    __tablename__ = "pump_telemetry_logs"
+class MultiDeviceTelemetryLog(Base):
+    __tablename__ = "multi_device_telemetry_logs"
     recorded_at = Column(DateTime(timezone=True), primary_key=True)
-    pump_id = Column(String(64), primary_key=True)
-    session_id = Column(UUID(as_uuid=True), nullable=True)
-    current_rate_ml_hr = Column(Numeric(6, 2))
-    volume_infused_ml = Column(Numeric(6, 2))
-    pressure_kpa = Column(Numeric(6, 2))
-    battery_pct = Column(SmallInteger)
-    alarms = Column(JSON, default=list)
+    device_id = Column(String(64), primary_key=True)
+    device_type = Column(String(30), nullable=False)
+    telemetry_data = Column(JSON, nullable=False)
 
 class DiagnosticReport(Base):
     __tablename__ = "diagnostic_reports"
