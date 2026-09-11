@@ -57,7 +57,6 @@ interface DeviceTelemetryPayload {
   device_type: DeviceType;
   timestamp: string;
   active_alarms?: string[];
-  // Patient Monitor (PM)
   vitals?: {
     heart_rate_bpm: number;
     spo2_pct: number;
@@ -66,7 +65,6 @@ interface DeviceTelemetryPayload {
     resp_rate_bpm: number;
     temp_c: number;
   };
-  // Syringe Pump (SP)
   infusion_status?: {
     rate_ml_hr: number;
     vtbi_ml: number;
@@ -77,7 +75,6 @@ interface DeviceTelemetryPayload {
   ders?: {
     drug_name: string;
   };
-  // Dialysis / CRRT (DL)
   dialysis_metrics?: {
     blood_flow_ml_min: number;
     uf_rate_ml_hr: number;
@@ -96,6 +93,7 @@ export default function SmartWardCentral() {
   // Modals
   const [showAdmissionModal, setShowAdmissionModal] = useState(false);
   const [showAttachDeviceModal, setShowAttachDeviceModal] = useState(false);
+  const [showBedQrStudio, setShowBedQrStudio] = useState(false);
   const [targetBedForDevice, setTargetBedForDevice] = useState<ActiveBed | null>(null);
   const [showDischargedModal, setShowDischargedModal] = useState(false);
   const [dischargedRecords, setDischargedRecords] = useState<DischargedRecord[]>([]);
@@ -104,7 +102,7 @@ export default function SmartWardCentral() {
   const [selectedPatientDossier, setSelectedPatientDossier] = useState<any>(null);
   const [qrTokenModal, setQrTokenModal] = useState<{ title: string; value: string } | null>(null);
 
-  // Admission Form (Zero Device Coupling)
+  // Admission Form
   const [formBed, setFormBed] = useState('ICU-B1');
   const [formMrn, setFormMrn] = useState('PTN-000001');
   const [formName, setFormName] = useState('RAGHU');
@@ -140,7 +138,7 @@ export default function SmartWardCentral() {
 
   const audioCtxRef = useRef<AudioContext | null>(null);
 
-  // Fetch Ward Registry & Bed Hierarchy
+  // Fetch Ward Registry
   const fetchRegistry = async () => {
     try {
       const res = await fetch(`${API_BASE}/api/v1/registry-status`);
@@ -205,7 +203,7 @@ export default function SmartWardCentral() {
     } catch (e) {}
   };
 
-  // WebSocket Ingestion for Multi-Device Telemetry
+  // WebSocket Ingestion
   useEffect(() => {
     const ws = new WebSocket(WS_BASE);
     ws.onopen = () => setConnected(true);
@@ -222,7 +220,7 @@ export default function SmartWardCentral() {
     return () => ws.close();
   }, [audioEnabled]);
 
-  // 1. Patient Admission (No Device Required)
+  // Patient Admission
   const handleAdmitPatient = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
@@ -255,7 +253,7 @@ export default function SmartWardCentral() {
     }
   };
 
-  // 2. Attach Device Binding (Multi-Device dynamically per bed)
+  // Attach Device
   const handleAttachDeviceSubmit = async (deviceIdToBind?: string, deviceTypeToBind?: DeviceType) => {
     if (!targetBedForDevice) return;
     const finalDeviceId = (deviceIdToBind || deviceSerialId).trim();
@@ -289,7 +287,7 @@ export default function SmartWardCentral() {
     }
   };
 
-  // 3. Unbind an Individual Device from a Bed
+  // Unbind Single Device
   const handleUnbindDevice = async (deviceId: string, bedNumber: string) => {
     if (!confirm(`Unbind and release equipment ${deviceId} from Bed ${bedNumber}? Patient will remain admitted.`)) return;
     try {
@@ -308,7 +306,7 @@ export default function SmartWardCentral() {
     }
   };
 
-  // 4. Discharge Patient (Releases Bed and All Attached Hardware)
+  // Discharge Patient
   const handleDischargePatient = async (bed: ActiveBed) => {
     const dischargeReason = prompt(
       `Discharge patient ${bed.patient_name} (${bed.patient_mrn})?\nEnter discharge type:\n1. Routine / Recovered\n2. Referred / Transferred\n3. Discharged on Request (DOR)\n4. LAMA`, 
@@ -332,7 +330,7 @@ export default function SmartWardCentral() {
     }
   };
 
-  // 5. Camera QR Decoder for Device Stickers (e.g. "PUMP:SP01-...", "MONITOR:PM-...", "DIALYSIS:DL-...")
+  // Camera QR Decoder for Hardware Chassis Stickers
   const decodeDeviceQrText = (decodedText: string) => {
     let devId = decodedText.trim();
     let devType: DeviceType = 'SYRINGE_PUMP';
@@ -375,7 +373,7 @@ export default function SmartWardCentral() {
           },
           () => {}
         );
-        setDeviceScanStatus('Camera Active: Point at device chassis QR barcode');
+        setDeviceScanStatus('Camera Active: Point at device chassis QR');
       } catch (err) {
         setDeviceScanStatus('Camera unavailable or permission denied.');
       }
@@ -497,7 +495,7 @@ export default function SmartWardCentral() {
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Enterprise Fleet: {beds.length} Active Bed Encounters | Real-time Multimodal Device Aggregator
+            Enterprise Fleet: {beds.length} Active Bed Encounters | Real-time Multimodal Fleet Station
           </p>
         </div>
 
@@ -520,6 +518,14 @@ export default function SmartWardCentral() {
           >
             <FolderClock className="w-4 h-4" />
             <span>Discharged Records</span>
+          </button>
+
+          <button
+            onClick={() => setShowBedQrStudio(true)}
+            className="flex items-center space-x-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-violet-600 text-white hover:bg-violet-500 transition shadow"
+          >
+            <Sparkles className="w-4 h-4 text-violet-200" />
+            <span>Auto-Pairing Studio (QRs)</span>
           </button>
 
           <button
@@ -628,7 +634,7 @@ export default function SmartWardCentral() {
                       const live = telemetry[dev.device_id];
                       const hasAlarm = live?.active_alarms && live.active_alarms.length > 0;
 
-                      // 🫀 Patient Monitor Bay
+                      // Patient Monitor Bay
                       if (dev.device_type === 'PATIENT_MONITOR') {
                         const hr = live?.vitals?.heart_rate_bpm ?? 76;
                         const spo2 = live?.vitals?.spo2_pct ?? 99;
@@ -675,7 +681,7 @@ export default function SmartWardCentral() {
                         );
                       }
 
-                      // 💉 Syringe Pump Bay
+                      // Syringe Pump Bay
                       if (dev.device_type === 'SYRINGE_PUMP') {
                         const drug = live?.ders?.drug_name || 'Norepinephrine';
                         const rate = live?.infusion_status?.rate_ml_hr ?? 5.0;
@@ -717,12 +723,11 @@ export default function SmartWardCentral() {
                         );
                       }
 
-                      // 🩸 Dialysis / CRRT Bay
+                      // Dialysis Bay
                       if (dev.device_type === 'DIALYSIS') {
                         const bfr = live?.dialysis_metrics?.blood_flow_ml_min ?? 250;
                         const ufr = live?.dialysis_metrics?.uf_rate_ml_hr ?? 300;
                         const totalUf = live?.dialysis_metrics?.total_uf_removed_ml ?? 1200;
-                        const venousPres = live?.dialysis_metrics?.venous_pressure_mmhg ?? 110;
 
                         return (
                           <div key={dev.device_id} className={`p-3 rounded-xl border transition ${hasAlarm ? 'bg-red-950/40 border-red-500' : 'bg-slate-900/80 border-rose-900/60'}`}>
@@ -784,7 +789,7 @@ export default function SmartWardCentral() {
         })}
       </div>
 
-      {/* MODAL: Admit Patient (Zero Hardware Coupling) */}
+      {/* MODAL: Admit Patient */}
       {showAdmissionModal && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-slate-800 rounded-2xl max-w-xl w-full p-6 shadow-2xl border border-slate-700 max-h-[90vh] overflow-y-auto">
@@ -875,7 +880,81 @@ export default function SmartWardCentral() {
         </div>
       )}
 
-      {/* MODAL: Attach Device to Patient Bed (Live Camera QR Scanner or Auto-Select) */}
+      {/* MODAL: Available Bed & Patient QR Studio / Auto-Binding */}
+      {showBedQrStudio && (
+        <div className="fixed inset-0 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-800 rounded-2xl max-w-xl w-full p-6 shadow-2xl border border-slate-700 max-h-[92vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-700">
+              <div className="flex items-center space-x-2">
+                <Sparkles className="w-5 h-5 text-violet-400" />
+                <h3 className="text-base font-bold text-white">Smart Bed & Patient Allocation Studio</h3>
+              </div>
+              <button onClick={() => setShowBedQrStudio(false)} className="text-slate-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-400 mt-2">
+              Automatically calculates the lowest available bed slot and next patient MRN to prevent human error.
+            </p>
+
+            {/* Individual QRs */}
+            <div className="grid grid-cols-2 gap-3 mt-4">
+              <div className="p-3 bg-slate-900 rounded-xl border border-slate-700 text-center flex flex-col items-center">
+                <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider">Suggested Available Bed</span>
+                <p className="text-lg font-black text-white mt-0.5">{formBed}</p>
+                <div className="p-2 bg-white rounded-lg mt-2">
+                  <QRCodeSVG value={`BED:${formBed}`} size={110} level="H" />
+                </div>
+                <span className="text-[10px] font-mono text-slate-400 mt-1">BED:{formBed}</span>
+              </div>
+
+              <div className="p-3 bg-slate-900 rounded-xl border border-slate-700 text-center flex flex-col items-center">
+                <span className="text-[10px] font-bold text-cyan-400 uppercase tracking-wider">Suggested Patient MRN</span>
+                <p className="text-lg font-black text-white mt-0.5">{formMrn}</p>
+                <div className="p-2 bg-white rounded-lg mt-2">
+                  <QRCodeSVG value={`MRN:${formMrn}`} size={110} level="H" />
+                </div>
+                <span className="text-[10px] font-mono text-slate-400 mt-1">MRN:{formMrn}</span>
+              </div>
+            </div>
+
+            {/* Combination 2-in-1 Token */}
+            <div className="mt-4 p-4 bg-slate-900 rounded-xl border border-slate-700 flex flex-col items-center justify-center">
+              <span className="text-xs font-bold text-violet-300 mb-2">Combination Bed + Patient 2-in-1 Token</span>
+              <div className="p-2 bg-white rounded-lg">
+                <QRCodeSVG value={`BED:${formBed}|MRN:${formMrn}`} size={140} level="H" />
+              </div>
+              <span className="text-[11px] font-mono text-slate-400 mt-2 break-all text-center">
+                BED:{formBed}|MRN:{formMrn}
+              </span>
+            </div>
+
+            {/* Action: Auto-Populate & Open Admission Form */}
+            <div className="mt-5 flex gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowBedQrStudio(false);
+                  setShowAdmissionModal(true);
+                }}
+                className="flex-1 py-3 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-bold transition shadow flex items-center justify-center gap-2"
+              >
+                <span>🚀 Bind {formBed} & {formMrn} → Proceed to Admission</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowBedQrStudio(false)}
+                className="px-4 py-3 bg-slate-700 text-slate-300 rounded-xl text-xs font-bold hover:bg-slate-600"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Attach Device to Patient Bed */}
       {showAttachDeviceModal && targetBedForDevice && (
         <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-700">
@@ -896,7 +975,6 @@ export default function SmartWardCentral() {
               </button>
             </div>
 
-            {/* Toggle Tabs */}
             <div className="grid grid-cols-2 gap-2 mt-4 bg-slate-900 p-1 rounded-xl border border-slate-700">
               <button
                 type="button"
@@ -946,7 +1024,6 @@ export default function SmartWardCentral() {
                   />
                 </div>
 
-                {/* Auto-Generated Hardware QR Preview */}
                 <div className="p-4 bg-slate-900 rounded-xl border border-slate-700 flex flex-col items-center justify-center">
                   <span className="text-[11px] text-slate-400 font-semibold mb-2">Hardware Chassis Pairing Token</span>
                   <div className="p-2 bg-white rounded-lg">
@@ -997,7 +1074,6 @@ export default function SmartWardCentral() {
               </button>
             </div>
 
-            {/* Embedded Live Camera Scanner View */}
             {labCameraActive && (
               <div className="mt-3 p-3 bg-slate-950 rounded-xl border border-slate-700 text-center space-y-2">
                 <div className="flex items-center justify-between text-xs text-emerald-400 font-semibold px-1">
@@ -1126,7 +1202,6 @@ export default function SmartWardCentral() {
             </div>
 
             <div className="mt-4 flex-1 overflow-y-auto space-y-6 pr-2">
-              {/* Demographics */}
               <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
                 <h4 className="text-xs font-bold uppercase tracking-wider text-indigo-700 mb-3 flex items-center gap-1.5">
                   <User className="w-4 h-4" /> Patient Demographics & Encounter Details
@@ -1145,7 +1220,6 @@ export default function SmartWardCentral() {
                 </div>
               </div>
 
-              {/* Diagnostic Investigations */}
               <div>
                 <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3 flex items-center gap-1.5">
                   <FlaskConical className="w-4 h-4 text-emerald-600" /> Attached Diagnostic Investigations ({selectedPatientDossier.total_reports})
@@ -1178,7 +1252,6 @@ export default function SmartWardCentral() {
                 )}
               </div>
 
-              {/* Multi-Device Hardware Telemetry Summary */}
               <div className="bg-indigo-50/60 p-4 rounded-xl border border-indigo-100">
                 <h4 className="text-xs font-bold uppercase tracking-wider text-indigo-800 mb-2 flex items-center gap-1.5">
                   <ShieldCheck className="w-4 h-4 text-indigo-600" /> Multi-Parameter Telemetry Delivery Audit
@@ -1190,7 +1263,6 @@ export default function SmartWardCentral() {
                 </div>
               </div>
 
-              {/* Verification Signature */}
               <div className="pt-4 border-t border-slate-200 flex justify-between items-end text-xs text-slate-500">
                 <div>
                   <p>Certified Electronic Clinical Record</p>
