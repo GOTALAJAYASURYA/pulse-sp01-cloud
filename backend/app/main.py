@@ -24,10 +24,18 @@ FLEET_PM = [f"PM01-2026-{i}" for i in range(1001, 1016)]                 # PM01-
 FLEET_DL = [f"DL01-2026-{i}" for i in range(5001, 5006)]                 # DL01-2026-5001 to 5005
 
 def init_db_safely():
-    """Initializes tables and columns inside startup so connection errors do not kill Uvicorn on import."""
+    """Initializes tables, seeds the default ICU ward, and applies schema migrations."""
     try:
         Base.metadata.create_all(bind=engine)
         with engine.begin() as conn:
+            # 1. Ensure the default ward exists first so foreign key constraints on beds do not fail
+            conn.execute(text("""
+                INSERT INTO wards (ward_id, name, department, total_beds)
+                VALUES ('icu-ward-a', 'Intensive Care Unit A', 'Critical Care', 20)
+                ON CONFLICT (ward_id) DO NOTHING;
+            """))
+
+            # 2. Add columns if missing
             conn.execute(text("""
                 ALTER TABLE patients ADD COLUMN IF NOT EXISTS age INTEGER;
                 ALTER TABLE patients ADD COLUMN IF NOT EXISTS gender VARCHAR(20) DEFAULT 'Male';
@@ -42,7 +50,7 @@ def init_db_safely():
 
                 ALTER TABLE device_associations ADD COLUMN IF NOT EXISTS device_type VARCHAR(30) DEFAULT 'SYRINGE_PUMP';
             """))
-        print("[✓] Database tables and multi-device schema initialized successfully.")
+        print("[✓] Database tables, schema migrations, and default ward verified successfully.")
     except Exception as e:
         print(f"[!] Warning: Database setup deferred or unreachable: {e}")
 
@@ -423,6 +431,13 @@ def admit_patient(req: AdmitPatientRequest, db: Session = Depends(get_db)):
 
         if db.query(Admission).filter(Admission.patient_id == req.patient_mrn, Admission.status == "ADMITTED").first():
             raise HTTPException(status_code=400, detail=f"Patient with MRN '{req.patient_mrn}' is currently already admitted!")
+
+        # Ensure default ward exists before inserting any bed
+        ward = db.query(Ward).filter(Ward.ward_id == "icu-ward-a").first()
+        if not ward:
+            ward = Ward(ward_id="icu-ward-a", name="Intensive Care Unit A", department="Critical Care", total_beds=20)
+            db.add(ward)
+            db.flush()
 
         bed = db.query(Bed).filter((Bed.bed_id == req.bed_number) | (Bed.bed_number == req.bed_number)).first()
         if not bed:
