@@ -3,13 +3,14 @@ import re
 import json
 import asyncio
 import random
+import time
 from datetime import datetime, timezone
 import uuid
-import redis.asyncio as aioredis
+from typing import Optional, List
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional, List
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
@@ -17,16 +18,15 @@ from app.core.database import SessionLocal, engine, Base
 from app.mqtt.worker import start_mqtt_worker
 from app.models.models import Ward, Bed, Pump, Patient, Admission, DeviceAssociation, PumpTelemetryLog, DiagnosticReport
 
-Base.metadata.create_all(bind=engine)
-
 # Standard Hospital Hardware Fleet Pools
-FLEET_SP = [f"SP01-2026-{str(i).zfill(4)}" for i in range(1, 21)]       # SP01-2026-0001 to SP01-2026-0020
-FLEET_PM = [f"PM01-2026-{i}" for i in range(1001, 1016)]                 # PM01-2026-1001 to PM01-2026-1015
-FLEET_DL = [f"DL01-2026-{i}" for i in range(5001, 5006)]                 # DL01-2026-5001 to DL01-2026-5005
+FLEET_SP = [f"SP01-2026-{str(i).zfill(4)}" for i in range(1, 21)]       # SP01-2026-0001 to 0020
+FLEET_PM = [f"PM01-2026-{i}" for i in range(1001, 1016)]                 # PM01-2026-1001 to 1015
+FLEET_DL = [f"DL01-2026-{i}" for i in range(5001, 5006)]                 # DL01-2026-5001 to 5005
 
-def run_db_migrations():
-    """Safely apply column additions without crashing the service."""
+def init_db_safely():
+    """Initializes tables and columns inside startup so connection errors do not kill Uvicorn on import."""
     try:
+        Base.metadata.create_all(bind=engine)
         with engine.begin() as conn:
             conn.execute(text("""
                 ALTER TABLE patients ADD COLUMN IF NOT EXISTS age INTEGER;
@@ -42,9 +42,9 @@ def run_db_migrations():
 
                 ALTER TABLE device_associations ADD COLUMN IF NOT EXISTS device_type VARCHAR(30) DEFAULT 'SYRINGE_PUMP';
             """))
-            print("[✓] Schema migrations validated.")
+        print("[✓] Database tables and multi-device schema initialized successfully.")
     except Exception as e:
-        print(f"[!] Migration notice: {e}")
+        print(f"[!] Warning: Database setup deferred or unreachable: {e}")
 
 app = FastAPI(title="Pulse Multi-Device Enterprise HIS & Telemetry Suite")
 
@@ -67,8 +67,16 @@ def get_db():
 LIVE_DEVICE_STATE = {}
 connected_websockets = set()
 
+# Controlled 2-minute clinical incident scheduler
+INCIDENT_SCHEDULE = {
+    "last_trigger_time": time.time(),
+    "active_anomaly_device_id": None,
+    "anomaly_type": None,
+    "anomaly_end_time": 0.0
+}
+
 async def telemetry_simulation_loop():
-    """Generates realistic hospital hemodynamic variations and clinical threshold alarms."""
+    """Generates realistic baseline telemetry with a controlled 2-minute anomaly event."""
     while True:
         try:
             db = SessionLocal()
@@ -78,27 +86,59 @@ async def telemetry_simulation_loop():
                 .all()
             )
 
+            now_sec = time.time()
+
+            # Schedule controlled incident every 120 seconds if devices exist
+            if active_associations:
+                if INCIDENT_SCHEDULE["active_anomaly_device_id"] and now_sec > INCIDENT_SCHEDULE["anomaly_end_time"]:
+                    INCIDENT_SCHEDULE["active_anomaly_device_id"] = None
+                    INCIDENT_SCHEDULE["anomaly_type"] = None
+
+                if not INCIDENT_SCHEDULE["active_anomaly_device_id"] and (now_sec - INCIDENT_SCHEDULE["last_trigger_time"] >= 120.0):
+                    target_assoc = random.choice(active_associations)
+                    dev_id = target_assoc.pump_id
+                    dtype = getattr(target_assoc, "device_type", None) or (
+                        "PATIENT_MONITOR" if "PM" in dev_id else ("DIALYSIS" if "DL" in dev_id else "SYRINGE_PUMP")
+                    )
+
+                    INCIDENT_SCHEDULE["last_trigger_time"] = now_sec
+                    INCIDENT_SCHEDULE["active_anomaly_device_id"] = dev_id
+                    INCIDENT_SCHEDULE["anomaly_end_time"] = now_sec + 15.0
+
+                    if dtype == "PATIENT_MONITOR":
+                        INCIDENT_SCHEDULE["anomaly_type"] = random.choice(["SPO2_DROP", "TACHYCARDIA"])
+                    elif dtype == "DIALYSIS":
+                        INCIDENT_SCHEDULE["anomaly_type"] = "HIGH_VENOUS_PRESSURE"
+                    else:
+                        INCIDENT_SCHEDULE["anomaly_type"] = "OCCLUSION_SPIKE"
+
             for assoc in active_associations:
                 dev_id = assoc.pump_id
                 dtype = getattr(assoc, "device_type", None) or (
                     "PATIENT_MONITOR" if "PM" in dev_id else ("DIALYSIS" if "DL" in dev_id else "SYRINGE_PUMP")
                 )
                 alarms = []
+                is_anomaly = (INCIDENT_SCHEDULE["active_anomaly_device_id"] == dev_id)
 
                 if dtype == "PATIENT_MONITOR":
                     prev = LIVE_DEVICE_STATE.get(dev_id, {}).get("vitals", {})
-                    hr = max(45, min(145, prev.get("heart_rate_bpm", 75) + random.choice([-2, -1, 0, 1, 2])))
-                    spo2 = max(86, min(100, prev.get("spo2_pct", 98) + random.choice([-1, 0, 0, 1])))
-                    sys = max(90, min(160, prev.get("nibp_systolic", 120) + random.choice([-2, 0, 2])))
-                    dia = max(55, min(95, prev.get("nibp_diastolic", 80) + random.choice([-1, 0, 1])))
-                    raw_temp = max(36.0, min(39.5, prev.get("temp_c", 36.8) + random.choice([-0.1, 0.0, 0.1])))
-                    temp = round(raw_temp, 1)
-                    resp = max(10, min(30, prev.get("resp_rate_bpm", 16) + random.choice([-1, 0, 1])))
 
-                    if hr < 50: alarms.append("HR LOW (BRADYCARDIA)")
-                    elif hr > 120: alarms.append("HR HIGH (TACHYCARDIA)")
-                    if spo2 < 90: alarms.append("SpO2 CRITICAL DESAT")
-                    if temp >= 38.5: alarms.append("HYPERTHERMIA HIGH TEMP")
+                    if is_anomaly and INCIDENT_SCHEDULE["anomaly_type"] == "SPO2_DROP":
+                        spo2 = 88
+                        hr = 104
+                        alarms.append("SpO2 CRITICAL DESAT (<90%)")
+                    elif is_anomaly and INCIDENT_SCHEDULE["anomaly_type"] == "TACHYCARDIA":
+                        spo2 = 98
+                        hr = 132
+                        alarms.append("HR HIGH (TACHYCARDIA >120)")
+                    else:
+                        hr = max(68, min(84, prev.get("heart_rate_bpm", 74) + random.choice([-1, 0, 1])))
+                        spo2 = max(97, min(100, prev.get("spo2_pct", 99) + random.choice([0, 0, 1])))
+
+                    sys = max(116, min(126, prev.get("nibp_systolic", 120) + random.choice([-1, 0, 1])))
+                    dia = max(76, min(84, prev.get("nibp_diastolic", 80) + random.choice([-1, 0, 1])))
+                    temp = 36.8
+                    resp = max(14, min(18, prev.get("resp_rate_bpm", 16) + random.choice([-1, 0, 1])))
 
                     payload = {
                         "device_id": dev_id,
@@ -117,13 +157,16 @@ async def telemetry_simulation_loop():
 
                 elif dtype == "DIALYSIS":
                     prev = LIVE_DEVICE_STATE.get(dev_id, {}).get("dialysis_metrics", {})
-                    bfr = prev.get("blood_flow_ml_min", 250) + random.choice([-5, 0, 5])
                     ufr = prev.get("uf_rate_ml_hr", 300)
-                    total_uf = prev.get("total_uf_removed_ml", 1200) + random.randint(1, 3)
-                    vp = prev.get("venous_pressure_mmhg", 110) + random.choice([-3, -1, 1, 3])
+                    total_uf = prev.get("total_uf_removed_ml", 1200) + random.randint(0, 1)
 
-                    if vp > 180: alarms.append("VENOUS PRESSURE HIGH")
-                    if bfr < 150: alarms.append("BLOOD FLOW RESTRICTED")
+                    if is_anomaly and INCIDENT_SCHEDULE["anomaly_type"] == "HIGH_VENOUS_PRESSURE":
+                        vp = 195
+                        bfr = 140
+                        alarms.append("VENOUS PRESSURE HIGH (>180)")
+                    else:
+                        vp = max(105, min(118, prev.get("venous_pressure_mmhg", 112) + random.choice([-1, 0, 1])))
+                        bfr = max(245, min(255, prev.get("blood_flow_ml_min", 250) + random.choice([-2, 0, 2])))
 
                     payload = {
                         "device_id": dev_id,
@@ -143,11 +186,12 @@ async def telemetry_simulation_loop():
                     prev = LIVE_DEVICE_STATE.get(dev_id, {}).get("infusion_status", {})
                     rate = prev.get("rate_ml_hr", 5.0)
                     vol = round(prev.get("volume_infused_ml", 8.5) + (rate / 3600.0) * 1.5, 2)
-                    raw_p = max(20.0, min(140.0, prev.get("pressure_kpa", 38.0) + random.choice([-2.0, -1.0, 0.5, 1.5, 3.0])))
-                    pressure = round(raw_p, 1)
 
-                    if pressure > 100.0: alarms.append("OCCLUSION DOWNSTREAM - HIGH PRESSURE")
-                    if vol >= 50.0: alarms.append("VTBI INFUSION COMPLETE")
+                    if is_anomaly and INCIDENT_SCHEDULE["anomaly_type"] == "OCCLUSION_SPIKE":
+                        pressure = 118.0
+                        alarms.append("OCCLUSION DOWNSTREAM - HIGH PRESSURE")
+                    else:
+                        pressure = round(max(34.0, min(42.0, prev.get("pressure_kpa", 38.0) + random.choice([-0.5, 0.0, 0.5]))), 1)
 
                     payload = {
                         "device_id": dev_id,
@@ -178,13 +222,16 @@ async def telemetry_simulation_loop():
 
             db.close()
         except Exception as e:
-            print(f"[!] Simulation tick notice: {e}")
+            print(f"[!] Simulation loop error: {e}")
         await asyncio.sleep(1.5)
 
 @app.on_event("startup")
 async def startup_event():
-    run_db_migrations()
-    start_mqtt_worker()
+    init_db_safely()
+    try:
+        start_mqtt_worker()
+    except Exception as e:
+        print(f"[!] MQTT Worker notice: {e}")
     asyncio.create_task(telemetry_simulation_loop())
 
 # --- Pydantic Schemas ---
@@ -223,7 +270,6 @@ class ReportAttachRequest(BaseModel):
     parameters: dict
     technician_notes: str = ""
     technician_name: str = "Diagnostic Staff"
-
 
 # --- REST Endpoints ---
 
@@ -264,7 +310,6 @@ def get_registry_status(db: Session = Depends(get_db)):
 
         db.commit()
 
-        # Query all active hardware
         active_associations = (
             db.query(DeviceAssociation)
             .filter(DeviceAssociation.unpaired_at.is_(None))
@@ -300,6 +345,8 @@ def get_registry_status(db: Session = Depends(get_db)):
                 "age": patient.age if patient else 45,
                 "gender": patient.gender if patient else "Male",
                 "blood_group": patient.blood_group if patient else "O+",
+                "phone_number": patient.phone_number if patient else "",
+                "address": patient.address if patient else "",
                 "admission_type": adm.admission_type,
                 "attending_doctor": adm.attending_doctor,
                 "admitted_at": adm.admitted_at.isoformat() if adm.admitted_at else None,
@@ -336,7 +383,6 @@ def get_registry_status(db: Session = Depends(get_db)):
             lowest_mrn_idx += 1
         next_mrn = f"PTN-{str(lowest_mrn_idx).zfill(6)}"
 
-        # 3. Lowest available Hardware from Predefined Fleet Pools
         suggested_sp = next((sp for sp in FLEET_SP if sp not in busy_device_ids), "SP01-2026-0001")
         suggested_pm = next((pm for pm in FLEET_PM if pm not in busy_device_ids), "PM01-2026-1001")
         suggested_dl = next((dl for dl in FLEET_DL if dl not in busy_device_ids), "DL01-2026-5001")
@@ -372,15 +418,12 @@ def admit_patient(req: AdmitPatientRequest, db: Session = Depends(get_db)):
     try:
         now = datetime.now(timezone.utc)
 
-        # Rule 1: Bed occupied?
         if db.query(Admission).filter(Admission.bed_id == req.bed_number, Admission.status == "ADMITTED").first():
             raise HTTPException(status_code=400, detail=f"Bed Station '{req.bed_number}' is already occupied!")
 
-        # Rule 2: Patient MRN already admitted?
         if db.query(Admission).filter(Admission.patient_id == req.patient_mrn, Admission.status == "ADMITTED").first():
             raise HTTPException(status_code=400, detail=f"Patient with MRN '{req.patient_mrn}' is currently already admitted!")
 
-        # Upsert Bed
         bed = db.query(Bed).filter((Bed.bed_id == req.bed_number) | (Bed.bed_number == req.bed_number)).first()
         if not bed:
             bed = Bed(bed_id=req.bed_number, ward_id="icu-ward-a", bed_number=req.bed_number, current_status="OCCUPIED")
@@ -389,7 +432,6 @@ def admit_patient(req: AdmitPatientRequest, db: Session = Depends(get_db)):
         else:
             bed.current_status = "OCCUPIED"
 
-        # Upsert Patient
         name_parts = req.patient_name.strip().split(" ", 1)
         first_name = name_parts[0] if name_parts[0] else "Patient"
         last_name = name_parts[1] if len(name_parts) > 1 else ""
@@ -526,7 +568,6 @@ def discharge_encounter(req: DischargeEncounterRequest, db: Session = Depends(ge
             adm.discharged_at = now
             adm.discharge_type = req.discharge_type
 
-            # Return all attached devices to the available pool
             active_devices = db.query(DeviceAssociation).filter(
                 DeviceAssociation.admission_id == adm.admission_id,
                 DeviceAssociation.unpaired_at.is_(None)
