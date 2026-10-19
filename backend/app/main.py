@@ -30,8 +30,8 @@ def init_db_safely():
         with engine.begin() as conn:
             # 1. Ensure the default ward exists first so foreign key constraints on beds do not fail
             conn.execute(text("""
-                INSERT INTO wards (ward_id, name, department, total_beds)
-                VALUES ('icu-ward-a', 'Intensive Care Unit A', 'Critical Care', 20)
+                INSERT INTO wards (ward_id, name)
+                VALUES ('icu-ward-a', 'Intensive Care Unit A')
                 ON CONFLICT (ward_id) DO NOTHING;
             """))
 
@@ -435,7 +435,7 @@ def admit_patient(req: AdmitPatientRequest, db: Session = Depends(get_db)):
         # Ensure default ward exists before inserting any bed
         ward = db.query(Ward).filter(Ward.ward_id == "icu-ward-a").first()
         if not ward:
-            ward = Ward(ward_id="icu-ward-a", name="Intensive Care Unit A", department="Critical Care", total_beds=20)
+            ward = Ward(ward_id="icu-ward-a", name="Intensive Care Unit A")
             db.add(ward)
             db.flush()
 
